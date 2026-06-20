@@ -48,6 +48,10 @@ class CodexAdapter(ToolAdapter):
         return None  # Codex 不支持单独的 commands 目录
 
     @property
+    def global_commands_dir(self) -> Path:
+        return Path.home() / ".codex" / "commands"
+
+    @property
     def skills_dir(self) -> str:
         return ".codex/skills"
 
@@ -59,11 +63,11 @@ class CodexAdapter(ToolAdapter):
 
     @property
     def supports_hooks(self) -> bool:
-        return False  # Codex 暂无 hook 机制
+        return True
 
     @property
     def hooks_config_path(self) -> str | None:
-        return None
+        return "hooks/hooks-codex.json"
 
     @property
     def mcp_config_path(self) -> str | None:
@@ -78,11 +82,11 @@ class CodexAdapter(ToolAdapter):
     @property
     def template_vars(self) -> dict[str, str]:
         return {
-            "plugin_root": "${CODEX_PLUGIN_ROOT}",
-            "engines_cmd": "bash ${CODEX_PLUGIN_ROOT}/engines/run.sh",
-            "engines_cmd_win": "%CODEX_PLUGIN_ROOT%\\engines\\run.bat",
+            "plugin_root": "${PLUGIN_ROOT}",
+            "engines_cmd": "bash ${PLUGIN_ROOT}/engines/run.sh",
+            "engines_cmd_win": "%PLUGIN_ROOT%\\engines\\run.bat",
             "cmd_prefix": self.command_prefix,
-            "context_var": "${CODEX_PLUGIN_ROOT}",
+            "context_var": "${PLUGIN_ROOT}",
             "aicode_dir": ".codex/aicode",
             "mcp_call": "通过 Codex MCP 工具调用",
             "tool_name": self.display_name,

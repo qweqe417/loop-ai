@@ -47,6 +47,10 @@ class ClaudeCodeAdapter(ToolAdapter):
         return ".claude/commands"
 
     @property
+    def global_commands_dir(self) -> Path:
+        return Path.home() / ".claude" / "commands"
+
+    @property
     def skills_dir(self) -> str:
         return ".claude/skills"
 

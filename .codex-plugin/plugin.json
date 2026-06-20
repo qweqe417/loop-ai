@@ -18,6 +18,7 @@
     "guard"
   ],
   "skills": "../skills/",
+  "hooks": "../hooks/hooks-codex.json",
   "interface": {
     "displayName": "AI Coding Loop",
     "shortDescription": "8-stage loop engineering: Intake->Spec->Plan->Execute->Verify->Repair->Review->Memory",

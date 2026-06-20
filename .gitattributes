@@ -1,3 +1,4 @@
 *.json text eol=lf
 skills/**/SKILL.md text eol=lf
+hooks/** text eol=lf
 .gitattributes text eol=lf

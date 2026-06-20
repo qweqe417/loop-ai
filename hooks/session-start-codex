@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Codex SessionStart hook for AI Coding Loop plugin
+#
+# 两个职责：
+# 1. 生成全局命令文件到 ~/.codex/commands/（一次性，幂等）
+# 2. 注入 using-ai-coding-loop bootstrap skill 到 AI context（每次会话）
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ── Step 1: 生成全局命令文件（幂等，静默失败） ──
+_python_bin="${PYTHON:-python}"
+if command -v python3 &>/dev/null; then
+    _python_bin="python3"
+elif command -v python &>/dev/null; then
+    _python_bin="python"
+fi
+
+if command -v "$_python_bin" &>/dev/null; then
+    "$_python_bin" "${PLUGIN_ROOT}/engines/cli.py" setup --global --target codex >/dev/null 2>&1 || true
+fi
+
+# ── Step 2: 读取 bootstrap skill ──
+using_aicode_content=$(cat "${PLUGIN_ROOT}/skills/using-ai-coding-loop/SKILL.md" 2>&1 || echo "Error reading using-ai-coding-loop skill")
+
+# ── JSON 转义 ──
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+using_aicode_escaped=$(escape_for_json "$using_aicode_content")
+session_context="<EXTREMELY_IMPORTANT>\nYou have AI Coding Loop superpowers.\n\n**Below is the full content of your 'ai-coding-loop:using-ai-coding-loop' skill - your introduction to using skills. For all other AI Coding Loop skills, follow the Codex skill-loading instructions in that skill:**\n\n${using_aicode_escaped}\n</EXTREMELY_IMPORTANT>"
+
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context" | cat
+
+exit 0

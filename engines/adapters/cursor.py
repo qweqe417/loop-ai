@@ -48,6 +48,10 @@ class CursorAdapter(ToolAdapter):
         return None
 
     @property
+    def global_commands_dir(self) -> Path:
+        return Path.home() / ".cursor" / "rules"
+
+    @property
     def skills_dir(self) -> str:
         return ".cursor/rules"  # Cursor 规则目录就是 skill 目录
 
