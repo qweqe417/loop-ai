@@ -1,0 +1,35 @@
+{
+  "name": "ai-coding-loop",
+  "version": "1.0.0",
+  "description": "AI Coding Loop - 8-stage loop engineering plugin for AI-assisted development (Codex CLI)",
+  "author": {
+    "name": "qweqe417"
+  },
+  "homepage": "https://github.com/qweqe417/loop-ai",
+  "repository": "https://github.com/qweqe417/loop-ai",
+  "license": "MIT",
+  "keywords": [
+    "loop-engineering",
+    "spec",
+    "plan",
+    "verify",
+    "scenario",
+    "memory",
+    "guard"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AI Coding Loop",
+    "shortDescription": "8-stage loop engineering: Intake->Spec->Plan->Execute->Verify->Repair->Review->Memory",
+    "longDescription": "A structured software engineering methodology for AI coding tools. Full lifecycle from requirement intake through spec generation, planning, execution, verification, repair, review, and memory persistence. Supports sub-loops for spec-only, plan-only, dev, test, direct, and review modes.",
+    "developerName": "qweqe417",
+    "category": "Coding",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "I have a feature to implement: <describe your feature>",
+      "Let me add something to this project.",
+      "I need to fix a bug."
+    ],
+    "websiteURL": "https://github.com/qweqe417/loop-ai"
+  }
+}

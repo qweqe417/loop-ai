@@ -1,0 +1,22 @@
+{
+  "name": "ai-coding-loop",
+  "displayName": "AI Coding Loop",
+  "version": "1.0.0",
+  "description": "AI Coding Loop - 8-stage loop engineering plugin for AI-assisted development (Cursor)",
+  "author": {
+    "name": "qweqe417"
+  },
+  "homepage": "https://github.com/qweqe417/loop-ai",
+  "repository": "https://github.com/qweqe417/loop-ai",
+  "license": "MIT",
+  "keywords": [
+    "loop-engineering",
+    "spec",
+    "plan",
+    "verify",
+    "scenario",
+    "memory",
+    "guard"
+  ],
+  "skills": "./skills/"
+}
