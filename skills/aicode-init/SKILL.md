@@ -1,5 +1,6 @@
 ---
 name: aicode-init
+user-invocable: true
 description: "Initialize AI Coding Loop for current project — scan, generate rules files, and set up .ai assets"
 ---
 

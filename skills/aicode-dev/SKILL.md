@@ -1,5 +1,6 @@
 ---
 name: aicode-dev
+user-invocable: true
 description: "Development mode — Execute→Verify→Repair→Review loop for when Spec/Plan already exist"
 ---
 

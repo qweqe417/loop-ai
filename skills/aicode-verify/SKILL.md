@@ -1,5 +1,6 @@
 ---
 name: aicode-verify
+user-invocable: true
 description: "Run scenario verification — execute scenarios, check assertions, output report"
 ---
 

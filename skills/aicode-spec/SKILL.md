@@ -1,5 +1,6 @@
 ---
 name: aicode-spec
+user-invocable: true
 description: "Generate a Spec from a prompt or document — goals, acceptance criteria, test scenarios"
 ---
 

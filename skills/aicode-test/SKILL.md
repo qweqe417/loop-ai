@@ -1,5 +1,6 @@
 ---
 name: aicode-test
+user-invocable: true
 description: "Test mode — Verify↔Repair loop for running scenarios and fixing failures"
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: aicode-plan
+user-invocable: true
 description: "Generate an Execution Plan — break Spec into tasks with allowed/forbidden files"
 ---
 

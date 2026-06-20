@@ -1,5 +1,6 @@
 ---
 name: aicode-calibrate
+user-invocable: true
 description: "Calibrate inferred rules — confirm, edit, or reject rules that init generated"
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: aicode-memory
+user-invocable: true
 description: "Extract and persist experiences — update .ai/memory.md from session learnings"
 ---
 

@@ -8,7 +8,10 @@
   "plugins": [
     {
       "name": "ai-coding-loop",
-      "source": "./",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/qweqe417/loop-ai.git"
+      },
       "description": "AI Coding Loop - 8-stage loop engineering plugin (Intake/Spec/Plan/Execute/Verify/Repair/Review/Memory)",
       "version": "1.0.0",
       "strict": true

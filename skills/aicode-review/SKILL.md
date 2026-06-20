@@ -1,5 +1,6 @@
 ---
 name: aicode-review
+user-invocable: true
 description: "Review code changes — check diff, guard violations, plan compliance"
 ---
 

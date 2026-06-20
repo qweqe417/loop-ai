@@ -1,5 +1,6 @@
 ---
 name: aicode-full
+user-invocable: true
 description: "Run the full 8-stage Loop Engineering cycle — Intake→Spec→Plan→Execute→Verify→Repair→Review→Memory"
 ---
 

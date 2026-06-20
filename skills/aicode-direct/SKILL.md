@@ -1,5 +1,6 @@
 ---
 name: aicode-direct
+user-invocable: true
 description: "Fast track for small changes — skip Spec/Plan, code directly with Guard checks"
 ---
 
