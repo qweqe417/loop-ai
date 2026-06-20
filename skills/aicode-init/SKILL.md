@@ -316,7 +316,28 @@ cd {项目根目录} && {D 中的测试命令}
 
 ---
 
-## 第四步：运行 Python 安装 .ai/ 资产
+## 第四步：创建 .ai/prd/ 目录
+
+Write `.ai/prd/README.md`，内容：
+
+```markdown
+# PRD 目录
+
+放你的需求文档、用户故事、截图、原型链接等。
+
+执行 /aicode-spec 时会自动读取这里的文档。
+
+## 推荐内容
+- 背景：为什么要做这个功能
+- 目标用户：谁会用到
+- 核心流程：用户操作的 3-5 个步骤
+- 验收标准：怎么判断做完了
+- 约束条件：技术/时间/资源限制
+```
+
+---
+
+## 第五步：运行 Python 安装 .ai/ 资产
 
 ```bash
 cd <引擎根目录> && python -m engines.cli init --assets-only --format json --project-root "<项目根目录>" --target <target_tool>
@@ -326,7 +347,7 @@ cd <引擎根目录> && python -m engines.cli init --assets-only --format json -
 
 ---
 
-## 第五步：报告
+## 第六步：报告
 
 ```
 ✅ AI Coding Loop Init 完成
@@ -341,9 +362,11 @@ cd <引擎根目录> && python -m engines.cli init --assets-only --format json -
   [已生成/已跳过] <路径4>
 
 资产:
-  .ai/ + MCP + loop-config.json
+  .ai/prd/ + MCP + loop-config.json
 
 下一步:
-  /aicode-calibrate  确认规则
-  /aicode-spec <需求>  开始第一个任务
+  1. 安装 superpowers：/aicode-spec 必须依赖，如未安装请立即执行安装
+  2. 建议安装 CodeGraph：codegraph init -i（可选的代码索引，加速后续流程）
+  3. /aicode-calibrate  确认规则
+  4. /aicode-spec <需求>  开始第一个任务
 ```
