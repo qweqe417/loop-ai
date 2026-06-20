@@ -88,7 +88,7 @@ class CodexAdapter(ToolAdapter):
     # ── 已有文件检测 ──
 
     def get_existing_file_patterns(self) -> list[str]:
-        return [".codex/instructions.md", ".codex/", ".codex/skills/"]
+        return [".codex/instructions.md", ".codex/", ".codex/rules/"]
 
     # ── 内容生成 ──
 

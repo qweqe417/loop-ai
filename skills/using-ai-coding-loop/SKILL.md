@@ -30,7 +30,7 @@ Use the `Skill` tool with plugin name `ai-coding-loop`:
 
 | Skill | Invocation | When to Use |
 |-------|-----------|-------------|
-| Init | `ai-coding-loop:aicode-init` | 初始化项目，扫描并生成所有 AI 配置 |
+| Init | `ai-coding-loop:aicode-init` | 初始化项目：AI 扫描代码并生成 4 个配置文件（主配置+3 规则文件），Python 安装 .ai/ 资产 |
 | Calibrate | `ai-coding-loop:aicode-calibrate` | 校准 init 生成的推断规则 |
 | Spec | `ai-coding-loop:aicode-spec` | 生成需求规格文档 |
 | Plan | `ai-coding-loop:aicode-plan` | 生成实现方案 |
@@ -63,19 +63,18 @@ INTAKE → SPEC → PLAN → EXECUTE → VERIFY → REPAIR → REVIEW → MEMORY
 
 ## Slash Commands
 
-After plugin installation, the SessionStart hook auto-generates these slash commands:
-- `/aicode-init` — 项目初始化
-- `/aicode-calibrate` — 校准规则
-- `/aicode-spec` — 生成 Spec
-- `/aicode-plan` — 生成 Plan
-- `/aicode-full` — 完整开发流程
-- `/aicode-dev` — 开发模式
-- `/aicode-test` — 测试模式
-- `/aicode-direct` — 快速通道
-- `/aicode-verify` — 场景验证
-- `/aicode-review` — 代码审查
-- `/aicode-memory` — 记忆沉淀
+使用 `Skill` 工具调用，无需生成任何文件：
 
-Each slash command maps directly to its corresponding skill.
-
-Each slash command maps directly to its corresponding skill.
+| 命令 | 技能调用 |
+|------|---------|
+| `/aicode-init` | `Skill: ai-coding-loop:aicode-init` |
+| `/aicode-calibrate` | `Skill: ai-coding-loop:aicode-calibrate` |
+| `/aicode-spec` | `Skill: ai-coding-loop:aicode-spec` |
+| `/aicode-plan` | `Skill: ai-coding-loop:aicode-plan` |
+| `/aicode-full` | `Skill: ai-coding-loop:aicode-full` |
+| `/aicode-dev` | `Skill: ai-coding-loop:aicode-dev` |
+| `/aicode-test` | `Skill: ai-coding-loop:aicode-test` |
+| `/aicode-direct` | `Skill: ai-coding-loop:aicode-direct` |
+| `/aicode-verify` | `Skill: ai-coding-loop:aicode-verify` |
+| `/aicode-review` | `Skill: ai-coding-loop:aicode-review` |
+| `/aicode-memory` | `Skill: ai-coding-loop:aicode-memory` |

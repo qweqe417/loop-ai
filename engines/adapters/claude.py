@@ -91,9 +91,6 @@ class ClaudeCodeAdapter(ToolAdapter):
             "CLAUDE.md",
             ".claude/",
             ".claude/rules/",
-            ".claude/aicode/",
-            ".claude/skills/",
-            "hooks/hooks.json",
         ]
 
     # ── 内容生成 ──
