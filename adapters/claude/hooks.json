@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/engines/run.sh context project-map --format json 2>/dev/null || echo '{\"note\":\"project map not available\"}'",
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

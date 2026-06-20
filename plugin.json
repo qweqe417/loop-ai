@@ -1,0 +1,27 @@
+{
+  "name": "ai-coding-loop",
+  "version": "1.0.0",
+  "description": "AI Coding Loop - 8-stage loop engineering methodology as a plugin for AI coding tools",
+  "author": "AI Coding Loop",
+  "license": "MIT",
+  "capabilities": [
+    "loop-engine",
+    "spec-generator",
+    "plan-generator",
+    "scenario-runner",
+    "guard-system",
+    "context-router",
+    "memory-system",
+    "project-initializer"
+  ],
+  "adapters": {
+    "claude": "adapters/claude/",
+    "codex": "adapters/codex/",
+    "cursor": "adapters/cursor/"
+  },
+  "install_commands": {
+    "claude": "python adapters/claude/install.py",
+    "codex": "python adapters/codex/install.py",
+    "cursor": "python adapters/cursor/install.py"
+  }
+}
