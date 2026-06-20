@@ -1,0 +1,37 @@
+{
+  "name": "ai-coding-loop",
+  "version": "1.0.0",
+  "description": "AI Coding Loop - 8-stage loop engineering plugin for AI-assisted development",
+  "author": {
+    "name": "qweqe417"
+  },
+  "homepage": "https://github.com/qweqe417/loop-ai",
+  "repository": "https://github.com/qweqe417/loop-ai",
+  "license": "MIT",
+  "keywords": [
+    "ai-coding",
+    "loop-engineering",
+    "spec",
+    "plan",
+    "verify",
+    "scenario",
+    "memory",
+    "guard"
+  ],
+  "claudePlugin": {
+    "type": "skill",
+    "skills": [
+      { "name": "aicode-init", "description": "Initialize AI Coding Loop - scan project, generate rules and config files", "path": "skills/aicode-init/SKILL.md" },
+      { "name": "aicode-calibrate", "description": "Calibrate inferred code style rules - confirm, edit, or reject", "path": "skills/aicode-calibrate/SKILL.md" },
+      { "name": "aicode-full", "description": "Run the full 8-stage Loop Engineering cycle from intake to memory", "path": "skills/aicode-full/SKILL.md" },
+      { "name": "aicode-spec", "description": "Generate a structured Spec from prompt or document", "path": "skills/aicode-spec/SKILL.md" },
+      { "name": "aicode-plan", "description": "Generate an Execution Plan - break Spec into tasks with boundaries", "path": "skills/aicode-plan/SKILL.md" },
+      { "name": "aicode-dev", "description": "Development mode - Execute/Verify/Repair/Review for existing Spec/Plan", "path": "skills/aicode-dev/SKILL.md" },
+      { "name": "aicode-test", "description": "Test mode - Verify/Repair loop for running scenarios and fixing failures", "path": "skills/aicode-test/SKILL.md" },
+      { "name": "aicode-direct", "description": "Fast track for small changes - skip Spec/Plan, code directly (L1-L2)", "path": "skills/aicode-direct/SKILL.md" },
+      { "name": "aicode-verify", "description": "Run scenario verification - execute scenarios, check assertions", "path": "skills/aicode-verify/SKILL.md" },
+      { "name": "aicode-review", "description": "Review code changes - check diff, guard, plan compliance", "path": "skills/aicode-review/SKILL.md" },
+      { "name": "aicode-memory", "description": "Extract and persist reusable experience to .ai/memory.md", "path": "skills/aicode-memory/SKILL.md" }
+    ]
+  }
+}
