@@ -269,33 +269,30 @@ class CodeGraphSource:
 # ── Memory 来源 ───────────────────────────────────────────────────
 
 class MemorySource:
-    """从 .ai/memory.md 召回相关记忆条目。"""
+    """从 .ai/memory.md 索引 + entries/ 明细层召回相关记忆。
+
+    召回策略:
+        - 永不全量读 entries/ 正文
+        - 按关键词 + 阶段优先级匹配 memory.md 索引行
+        - 限制 top 3~5 条
+    """
 
     def __init__(self, project_root: str | Path = ".") -> None:
         self._root = Path(project_root).resolve()
 
     def load_all(self) -> str:
-        """读取完整的 .ai/memory.md。"""
-        fp = self._root / ".ai" / "memory.md"
-        if fp.exists():
-            try:
-                return fp.read_text(encoding="utf-8")
-            except Exception:
-                return ""
-        return ""
+        """读取 memory.md 索引全文（轻量级）。"""
+        from engines.memory.store import MemoryStore
+        store = MemoryStore(project_root=self._root)
+        return store.index_path.read_text(encoding="utf-8") if store.index_path.exists() else ""
 
-    def load_relevant(self, keywords: list[str] | None = None, limit: int = 5) -> ContextPiece:
-        """召回与关键词相关的记忆条目。
-
-        简单实现：按行解析 markdown 中的 `- [xxx] title content` 条目，
-        匹配关键词，最多返回 limit 条。
-        """
-        text = self.load_all()
-        if not text or not keywords:
-            # 无关键词时返回最近 5 条
-            entries = _parse_memory_entries(text)[:limit]
-        else:
-            entries = _search_memory_entries(text, keywords)[:limit]
+    def load_relevant(
+        self, keywords: list[str] | None = None, stage: str = "", limit: int = 5
+    ) -> ContextPiece:
+        """分级召回：关键词 + 阶段优先级，只返回索引摘要。"""
+        from engines.memory.store import MemoryStore
+        store = MemoryStore(project_root=self._root)
+        entries = store.recall(keywords=keywords or [], stage=stage, limit=limit)
 
         if not entries:
             return ContextPiece(
@@ -307,24 +304,31 @@ class MemorySource:
                 metadata={"entries": 0},
             )
 
-        # 每条只给标题 + 一句话
-        content = "\n".join(f"- {e['title']}: {e['summary']}" for e in entries)
+        # 每条只给标题 + content（1~3句结论），不载入 entries/ 明细
+        lines = []
+        for e in entries:
+            tags_str = f"[{','.join(e.tags)}]" if e.tags else ""
+            lines.append(f"- [{e.id}] {e.content or e.title} {tags_str}")
+
+        content = "\n".join(lines)
         return ContextPiece(
             source="memory",
             path=".ai/memory.md",
             content=content,
             token_estimate=_estimate(content),
             priority=2,
-            metadata={"entries": len(entries), "keywords": keywords or []},
+            metadata={"entries": len(entries), "keywords": keywords or [], "stage": stage},
         )
 
     def load_recent_failures(self, limit: int = 3) -> ContextPiece:
         """召回最近失败记录（REPAIR 阶段专用）。"""
-        text = self.load_all()
-        if not text:
-            return ContextPiece(source="memory", path="", content="[no memory]", token_estimate=3, priority=3)
+        from engines.memory import MemoryCategory
+        from engines.memory.store import MemoryStore
+        store = MemoryStore(project_root=self._root)
+        entries = store.recall_by_category(
+            [MemoryCategory.FAILURE_PATTERN, MemoryCategory.PITFALL], limit=limit
+        )
 
-        entries = _search_memory_entries(text, ["fail", "error", "bug", "pitfall"])[:limit]
         if not entries:
             return ContextPiece(
                 source="memory",
@@ -334,7 +338,8 @@ class MemorySource:
                 priority=3,
             )
 
-        content = "\n".join(f"- {e['title']}: {e['summary']}" for e in entries)
+        lines = [f"- [{e.id}] {e.content or e.title}" for e in entries]
+        content = "\n".join(lines)
         return ContextPiece(
             source="memory",
             path=".ai/memory.md",
@@ -363,46 +368,6 @@ def _summarize_file(head: str, total_lines: int) -> str:
         return head
     return f"[showing first 80 of {total_lines} lines]\n\n{head}"
 
-
-def _parse_memory_entries(text: str) -> list[dict]:
-    """简单解析 .ai/memory.md 中的条目。
-
-    支持格式:
-      - [id] Title: summary
-      - **Title**: content
-    """
-    entries: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("- "):
-            continue
-        body = line[2:]
-        # 尝试 [id] title: summary 格式
-        if body.startswith("[") and "]" in body:
-            bracket_end = body.index("]")
-            eid = body[1:bracket_end]
-            rest = body[bracket_end + 1:].strip()
-            if ":" in rest:
-                title, _, summary = rest.partition(":")
-                entries.append({"id": eid, "title": title.strip(), "summary": summary.strip()})
-            else:
-                entries.append({"id": eid, "title": rest, "summary": ""})
-        else:
-            entries.append({"id": "", "title": body[:80], "summary": ""})
-    return entries
-
-
-def _search_memory_entries(text: str, keywords: list[str]) -> list[dict]:
-    """按关键词匹配记忆条目。"""
-    all_entries = _parse_memory_entries(text)
-    scored: list[tuple[int, dict]] = []
-    for entry in all_entries:
-        combined = f"{entry['title']} {entry['summary']} {entry.get('id', '')}".lower()
-        score = sum(1 for kw in keywords if kw.lower() in combined)
-        if score > 0:
-            scored.append((score, entry))
-    scored.sort(key=lambda x: -x[0])
-    return [e for _, e in scored]
 
 
 def _invoke_codegraph(tool: str, params: dict) -> str:

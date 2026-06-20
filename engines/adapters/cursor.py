@@ -154,55 +154,16 @@ class CursorAdapter(ToolAdapter):
                 instructions = self.render_skill(pv.get_ai_instructions())
                 lines.append(instructions)
 
+        # 规范文件生成指令
         lines.append("")
-        lines.append("## 详细规则")
-        lines.append(f"- `{self.rules_dir}/aicode-code-style.md` — 代码风格")
-        lines.append(f"- `{self.rules_dir}/aicode-testing.md` — 测试规范")
-        lines.append(f"- `{self.rules_dir}/aicode-safety.md` — 安全约束")
-        lines.append("- `.ai/memory.md` — 项目经验")
+        lines.append(self._render_rules_generation_instruction(
+            self.display_name, self.rules_dir
+        ))
+        lines.append(f"（Cursor 规则文件建议使用 `aicode-` 前缀，如 `aicode-code-style.md`）")
+        lines.append("- `.ai/memory.md` — 项目记忆索引")
         lines.append("")
 
         return "\n".join(lines)
-
-    def render_rules(self, profile: ProjectProfile) -> dict[str, str]:
-        """Cursor 规则文件加 aicode- 前缀避免与用户已有规则冲突。"""
-        p = profile
-        raw_rules = {
-            "code-style.md": self._render_code_style_rule(p),
-            "testing.md": self._render_testing_rule(p),
-            "safety.md": self._render_safety_rule(),
-        }
-        return {f"aicode-{k}": v for k, v in raw_rules.items()}
-
-    def render_aicode_files(self, profile: ProjectProfile) -> dict[str, str]:
-        p = profile
-        return {
-            "project-map.md": self._render_project_map(p),
-            "style.md": self._render_style_summary(p),
-            "workflow.md": self.render_workflow(p),
-        }
-
-    def render_workflow(self, profile: ProjectProfile) -> str:
-        cp = self.command_prefix
-        return "\n".join([
-            "# AI Coding Loop — 工作流",
-            "",
-            "## 可用规则引用",
-            "",
-            "| 模式 | 规则引用 | 场景 |",
-            "|------|---------|------|",
-            f"| 完整流程 | `{cp}aicode-full` | L3-L5 大中型需求 |",
-            f"| 开发模式 | `{cp}aicode-dev` | 已有 Spec/Plan |",
-            f"| 测试模式 | `{cp}aicode-test` | 仅验证+修复 |",
-            f"| Direct | `{cp}aicode-direct` | L1-L2 小改动 |",
-            f"| Spec | `{cp}aicode-spec` | 仅生成规格 |",
-            f"| Review | `{cp}aicode-review` | 代码审查 |",
-            f"| Memory | `{cp}aicode-memory` | 经验沉淀 |",
-            "",
-            "## 流程",
-            "INTAKE → SPEC → PLAN → EXECUTE → VERIFY → REPAIR → REVIEW → MEMORY",
-            "",
-        ])
 
     # ── MCP 配置 ──
 

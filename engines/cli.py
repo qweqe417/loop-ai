@@ -470,16 +470,41 @@ def _cmd_memory(args: argparse.Namespace) -> dict:
         if keyword:
             entries = store.find(tags=[keyword]) if keyword else []
         else:
-            entries = store.load() if hasattr(store, 'load') else []
-        return {"success": True, "entries": [e.model_dump() for e in entries], "count": len(entries)}
+            entries = store.load()
+        return {
+            "success": True,
+            "entries": [e.model_dump() for e in entries],
+            "count": len(entries),
+        }
 
     elif args.action == "stats":
         stats = store.stats()
         return {"success": True, "stats": stats.model_dump()}
 
-    # update
-    store.save([])
-    return {"success": True, "message": "Memory update placeholder - run through AI"}
+    elif args.action == "governance":
+        gov = store.governance()
+        return {"success": True, "governance": gov.model_dump()}
+
+    elif args.action == "recall":
+        keywords = args.keywords.split(",") if getattr(args, "keywords", "") else []
+        stage = getattr(args, "stage", "") or ""
+        limit = getattr(args, "limit", 0) or 5
+        entries = store.recall(keywords=keywords, stage=stage, limit=limit)
+        return {
+            "success": True,
+            "entries": [e.model_dump() for e in entries],
+            "count": len(entries),
+        }
+
+    # update: regenerate projections
+    from engines.memory.projection import MemoryProjection
+    proj = MemoryProjection(store)
+    results = proj.sync_all()
+    return {
+        "success": True,
+        "message": "Projections regenerated",
+        "results": results,
+    }
 
 
 # ── context ──────────────────────────────────────

@@ -2173,10 +2173,11 @@ class ReviewHandler(StageHandler):
 
 
 class MemoryHandler(StageHandler):
-    """记忆处理器 —— 提取经验、写入 .ai/memory.md、同步投影。
+    """记忆处理器 —— 三层存储：session → index + entries → projection。
 
-    Python 职责（架构定义）:
-        MemoryExtractor 提取候选、MemoryProjection 同步
+    Python 职责:
+        MemoryExtractor 提取候选 → MemoryStore 写入 entries/ + 更新索引
+        → MemoryProjection 同步到 projections/
     AI 职责:
         判断哪些值得沉淀
     """
@@ -2193,24 +2194,31 @@ class MemoryHandler(StageHandler):
             from engines.memory.store import MemoryStore
             from engines.memory.projection import MemoryProjection
 
-            # 1. 从 failures / decisions 中提取候选 memory
             store = MemoryStore(project_root=state.project_root)
-            store.load()  # 加载现有条目
-            extractor = MemoryExtractor()
 
+            # 0. 迁移旧格式（如果需要）
+            store.migrate_if_needed()
+
+            store.load_index()
+
+            # 1. 提取候选 memory
+            extractor = MemoryExtractor()
             candidates = extractor.extract(state)
             state.task_state.notes.append(
                 f"[MEMORY] 提取 {len(candidates)} 条候选 memory"
             )
 
-            # 2. 写入 .ai/memory.md
+            # 2. 保存 session 原料 → .ai/memory/sessions/
+            session = extractor.build_session_memory(state)
+            store.save_session(session.model_dump() if hasattr(session, 'model_dump') else session)
+
+            # 3. 写入 entries/ + 更新 memory.md 索引
             added = 0
             for entry in candidates:
                 if store.add(entry):
                     added += 1
 
             if added > 0:
-                # 自动升级: 与新条目有相同 tags 的已有 DRAFT 条目 → CONFIRMED
                 all_tags: list[str] = []
                 for entry in candidates:
                     all_tags.extend(entry.tags)
@@ -2219,14 +2227,24 @@ class MemoryHandler(StageHandler):
                     state.task_state.notes.append(
                         f"[MEMORY] 自动升级 {promoted} 条 DRAFT→CONFIRMED"
                     )
-
-                store.save(entries=None)  # 使用内部 _entries
                 state.task_state.notes.append(
-                    f"[MEMORY] 写入 {added} 条新 memory 到 .ai/memory.md"
+                    f"[MEMORY] 写入 {added} 条新 memory → .ai/memory/entries/ + 索引更新"
                 )
                 logger.info("Memory: %d new entries written", added)
 
-            # 3. 同步投影到 CLAUDE.md
+            # 4. 定期治理: 淘汰过期 draft、检查压缩
+            stale_count = store.evict_stale_drafts()
+            if stale_count:
+                state.task_state.notes.append(
+                    f"[MEMORY] 淘汰 {stale_count} 条过期 draft → archive/stale/"
+                )
+            compress_groups = store.compress_duplicates()
+            if compress_groups:
+                state.task_state.notes.append(
+                    f"[MEMORY] 发现 {compress_groups} 组可压缩的同类记忆"
+                )
+
+            # 5. 同步投影 → .ai/memory/projections/ + CLAUDE.md 等
             projection = MemoryProjection(store)
             updated = projection.sync("claude")
             state.task_state.notes.append(

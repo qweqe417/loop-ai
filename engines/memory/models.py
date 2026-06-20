@@ -1,6 +1,9 @@
 """Memory 数据模型。
 
-定义记忆条目的分类、结构和会话记忆。
+三层架构：
+1. SessionMemory — 单次任务的临时记忆 → .ai/memory/sessions/
+2. Canonical Memory — 项目权威记忆（.ai/memory.md 索引 + entries/ 明细）
+3. Tool Projection — 工具投影（.ai/memory/projections/）
 """
 
 from __future__ import annotations
@@ -15,48 +18,56 @@ from pydantic import BaseModel, Field
 class MemoryCategory(str, Enum):
     """记忆条目分类。"""
 
-    CODE_STYLE = "code_style"            # 代码风格规范
-    PITFALL = "pitfall"                  # 历史坑 / 踩过的坑
-    MODULE_BOUNDARY = "module_boundary"  # 模块边界 / 职责划分
-    TESTING = "testing"                  # 测试经验 / 验证方式
-    ARCHITECTURE = "architecture"        # 架构决策 / 设计原则
-    PROHIBITED = "prohibited"            # 禁止事项
-    VERIFICATION = "verification"        # 验证模式 / scenario 模板
-    FAILURE_PATTERN = "failure_pattern"  # 已识别的失败模式+修复方案
-    RULE = "rule"                        # 通用规则
+    RULE = "rule"                        # 通用开发规则
+    PITFALL = "pitfall"                  # 历史坑和易错点
+    VERIFICATION = "verification"        # 验证方式、场景、回归检查
+    TESTING = "testing"                  # 测试经验
+    MODULE_BOUNDARY = "module_boundary"  # 模块职责边界
+    ARCHITECTURE = "architecture"        # 架构决策和原则
+    FAILURE_PATTERN = "failure_pattern"  # 常见失败模式及修复路径
+    PROHIBITED = "prohibited"            # 明确禁止事项
+    CODE_STYLE = "code_style"            # 稳定的风格规范
 
 
 class Confidence(str, Enum):
     """条目置信度。"""
-    CONFIRMED = "confirmed"   # 已验证，可投影到工具文件
-    DRAFT = "draft"           # 待确认，只存 .ai/memory.md
-    DEPRECATED = "deprecated"  # 已废弃，保留但不同步
+    CONFIRMED = "confirmed"     # 已验证有效，可投影
+    DRAFT = "draft"             # 候选记忆，存但不强投影
+    DEPRECATED = "deprecated"   # 已过时，保留历史，不参与默认召回
 
 
 class MemoryEntry(BaseModel):
-    """单条持久化记忆 —— 存储在 .ai/memory.md。"""
+    """单条持久化记忆。
 
-    id: str = Field(description="唯一标识，如 style-001, pitfall-003")
+    memory.md 索引行只放摘要；完整正文存 entries/{id}.md。
+    """
+
+    id: str = Field(description="唯一标识，如 rule-001, pitfall-003")
     category: MemoryCategory = Field(description="分类")
-    title: str = Field(description="简短标题")
-    content: str = Field(description="完整内容（1-3 句话）")
+    title: str = Field(description="简短标题（1 句话）")
+    content: str = Field(description="1~3 句结论（存于 memory.md 索引行）")
     source: str = Field(default="manual", description="来源 task_id 或 manual")
-    confidence: Confidence = Field(default=Confidence.CONFIRMED)
+    confidence: Confidence = Field(default=Confidence.DRAFT)
     tags: list[str] = Field(default_factory=list, description="标签")
+    hit_count: int = Field(default=0, description="召回命中次数")
+    last_hit_at: datetime | None = Field(default=None, description="最近一次被召回的时间")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
     def summary_line(self) -> str:
-        """生成单行摘要，用于 markdown 渲染。"""
-        return f"- [{self.id}] {self.title} (source: {self.source})"
+        """生成索引行，写入 memory.md。"""
+        conf = self.confidence.value
+        tags_str = ",".join(self.tags) if self.tags else ""
+        return f"- [{self.id}] {self.title} `[{conf}]` `[{tags_str}]`"
+
+    def record_hit(self) -> None:
+        """记录一次召回命中。"""
+        self.hit_count += 1
+        self.last_hit_at = datetime.now()
 
 
 class SessionMemory(BaseModel):
-    """会话记忆 —— 单次 Loop 任务的临时记录。
-
-    任务结束后，MemoryExtractor 从中筛选可沉淀的内容，
-    转化为 MemoryEntry 写入 .ai/memory.md。
-    """
+    """单次 Loop 任务的临时记录 → .ai/memory/sessions/{task_id}.json。"""
 
     task_id: str = Field(description="关联的任务 ID")
     related_spec: str = Field(default="", description="关联的 Spec 标识")
@@ -69,7 +80,7 @@ class SessionMemory(BaseModel):
     patterns_observed: list[str] = Field(
         default_factory=list, description="观察到的模式"
     )
-    candidates: list[MemoryEntry] = Field(
+    candidates: list[dict[str, Any]] = Field(
         default_factory=list, description="待沉淀的记忆候选"
     )
     notes: list[str] = Field(default_factory=list, description="备注")
@@ -77,12 +88,32 @@ class SessionMemory(BaseModel):
     completed_at: datetime | None = Field(default=None)
 
 
-class MemoryStats(BaseModel):
-    """记忆库统计。"""
+class MemoryGovernance(BaseModel):
+    """记忆系统运营面板数据 → .ai/memory/stats.json。
+
+    不是给 AI 读正文，而是给系统管理 memory 用的。
+    """
 
     total_entries: int = 0
     by_category: dict[str, int] = Field(default_factory=dict)
     confirmed: int = 0
     draft: int = 0
     deprecated: int = 0
-    last_updated: datetime | None = None
+    archived: int = 0
+    last_updated: str = ""
+    last_compression: str = ""           # 最近一次压缩时间
+    last_archival: str = ""              # 最近一次归档时间
+    last_projection: str = ""            # 最近一次投影时间
+    hot_tags: list[dict[str, Any]] = Field(default_factory=list)  # [{tag, count}]
+    cold_entries: list[str] = Field(default_factory=list)  # 长期未命中的 entry id
+
+
+class MemoryStats(BaseModel):
+    """记忆库统计（兼容旧接口）。"""
+
+    total_entries: int = 0
+    by_category: dict[str, int] = Field(default_factory=dict)
+    confirmed: int = 0
+    draft: int = 0
+    deprecated: int = 0
+    last_updated: str = ""

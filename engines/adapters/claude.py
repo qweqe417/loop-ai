@@ -165,71 +165,18 @@ class ClaudeCodeAdapter(ToolAdapter):
                 instructions = self.render_skill(pv.get_ai_instructions())
                 lines.append(instructions)
 
-        # 细规则索引
+        # 规范文件生成指令
         lines.append("")
-        lines.append("## 详细规则")
-        lines.append("")
-        lines.append("详细规则分散在以下文件中，按需读取：")
-        lines.append("- `.claude/rules/code-style.md` — 代码风格规范")
-        lines.append("- `.claude/rules/testing.md` — 测试规范")
-        lines.append("- `.claude/rules/safety.md` — 安全约束")
-        if (Path(profile.root_path) / ".claude/rules/database.md").exists():
-            lines.append("- `.claude/rules/database.md` — 数据库规范")
-        if (Path(profile.root_path) / ".claude/rules/api.md").exists():
-            lines.append("- `.claude/rules/api.md` — API 规范")
-        lines.append("- `.ai/memory.md` — 项目经验沉淀")
+        lines.append(self._render_rules_generation_instruction(
+            self.display_name, self.rules_dir
+        ))
+        lines.append("- `.ai/memory.md` — 项目记忆索引（摘要层）")
 
         lines.append("")
         lines.append("<!-- AI_CODING_LOOP_MEMORY_START -->")
         lines.append("<!-- AI_CODING_LOOP_MEMORY_END -->")
 
         return "\n".join(lines)
-
-    def render_rules(self, profile: ProjectProfile) -> dict[str, str]:
-        """生成 .claude/rules/*.md。"""
-        p = profile
-        return {
-            "code-style.md": self._render_code_style_rule(p),
-            "testing.md": self._render_testing_rule(p),
-            "safety.md": self._render_safety_rule(),
-        }
-
-    def render_aicode_files(self, profile: ProjectProfile) -> dict[str, str]:
-        """生成 .claude/aicode/*（项目地图、风格摘要、工作流）。"""
-        p = profile
-        return {
-            "project-map.md": self._render_project_map(p),
-            "style.md": self._render_style_summary(p),
-            "workflow.md": self.render_workflow(p),
-        }
-
-    def render_workflow(self, profile: ProjectProfile) -> str:
-        """工作流说明 —— 命令格式为 /aicode-xxx。"""
-        cp = self.command_prefix
-        return "\n".join([
-            "# AI Coding Loop — 工作流说明",
-            "",
-            "## 可用模式",
-            "",
-            "| 模式 | 命令 | 适用场景 |",
-            "|------|------|---------|",
-            f"| 完整流程 | `{cp}aicode-full` | L3-L5 大中型需求 |",
-            f"| 开发模式 | `{cp}aicode-dev` | 已有 Spec/Plan |",
-            f"| 测试模式 | `{cp}aicode-test` | 仅验证+修复 |",
-            f"| Direct 模式 | `{cp}aicode-direct` | L1-L2 小改动 |",
-            f"| Spec 生成 | `{cp}aicode-spec` | 只生成规格文档 |",
-            f"| 代码审查 | `{cp}aicode-review` | PR 审查 |",
-            f"| 记忆沉淀 | `{cp}aicode-memory` | 经验持久化 |",
-            "",
-            "## 流程说明",
-            "",
-            "完整 Loop 流程: INTAKE → SPEC → PLAN → EXECUTE → VERIFY → REPAIR → REVIEW → MEMORY",
-            "",
-            "Direct Mode: DIRECT_EXECUTE → VERIFY → REVIEW（跳过 Spec/Plan）",
-            "",
-            "Test Mode: VERIFY ↔ REPAIR（验证+修复循环）",
-            "",
-        ])
 
     # ── MCP 配置 ──
 
@@ -403,11 +350,15 @@ class ClaudeCodeAdapter(ToolAdapter):
     def _get_aicode_commands(self) -> list[str]:
         cp = self.command_prefix
         return [
-            f"{cp}aicode-full — 完整开发流程（Spec→Plan→执行→验证→审查→记忆）",
-            f"{cp}aicode-dev — 开发模式（已有 Spec/Plan 时用）",
-            f"{cp}aicode-test — 测试模式（仅验证+修复）",
-            f"{cp}aicode-spec — 生成 Spec（不写代码）",
-            f"{cp}aicode-direct — 快速通道（小改动）",
+            f"{cp}aicode-init — 项目初始化",
+            f"{cp}aicode-calibrate — 校准规则",
+            f"{cp}aicode-spec — 生成 Spec",
+            f"{cp}aicode-plan — 生成 Plan",
+            f"{cp}aicode-full — 完整 8 阶段流程",
+            f"{cp}aicode-dev — 开发模式",
+            f"{cp}aicode-test — 测试模式",
+            f"{cp}aicode-direct — 快速通道",
+            f"{cp}aicode-verify — 场景验证",
             f"{cp}aicode-review — 代码审查",
             f"{cp}aicode-memory — 记忆沉淀",
         ]

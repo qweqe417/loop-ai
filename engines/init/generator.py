@@ -1,8 +1,12 @@
-"""FileGenerator —— 根据 ProjectProfile 和 ToolAdapter 生成所有项目文件。
+"""FileGenerator —— 根据 ProjectProfile 和 ToolAdapter 生成项目配置文件。
 
-**现在完全工具无关** —— 所有路径和内容委托给 ToolAdapter。
+**完全工具无关** —— 所有路径和内容委托给 ToolAdapter。
 支持 Claude Code / Codex / Cursor 等任意 AI 工具。
-（.claude/skills/ 等由 adapter.install() 在插件安装时写入，init 只生成规则和资产文件）
+
+init 只生成主配置文件（CLAUDE.md 等）和 .ai/ 跨工具资产。
+规则文件（code-style.md/testing.md/safety.md）不再硬编码生成，
+而是由 AI 在首次处理任务时根据实际代码自行推断并写入 rules_dir。
+skills/ 和 MCP 配置由 adapter.install() 在插件安装时写入。
 """
 
 from __future__ import annotations
@@ -63,8 +67,6 @@ class FileGenerator:
         adapter = self.adapter
 
         self._generate_main_config()
-        self._generate_rules()
-        self._generate_aicode_files()
         self._generate_ai_assets()
 
         logger.info(
@@ -157,68 +159,39 @@ class FileGenerator:
         suggestion_path.write_text("\n".join(suggestion), encoding="utf-8")
         self._created.append(str(suggestion_path.relative_to(self._root)))
 
-    # ── 规则文件 ────────────────────────────────────────
-
-    def _generate_rules(self) -> None:
-        """生成规则文件（.claude/rules/ 或 .cursor/rules/ 等）。"""
-        adapter = self.adapter
-        p = self.profile
-        rules_dir = self._root / adapter.rules_dir
-        rules_dir.mkdir(parents=True, exist_ok=True)
-
-        rules = adapter.render_rules(p)
-
-        for filename, content in rules.items():
-            target = rules_dir / filename
-            if target.exists():
-                self._skipped.append(str(target.relative_to(self._root)))
-                continue
-            target.write_text(content, encoding="utf-8")
-            self._created.append(str(target.relative_to(self._root)))
-
-    # ── AI Coding Loop 资产 ─────────────────────────────
-
-    def _generate_aicode_files(self) -> None:
-        """生成 AI Coding Loop 资产文件（项目地图、风格摘要、工作流）。"""
-        adapter = self.adapter
-        p = self.profile
-        aicode_dir = self._root / adapter.aicode_dir
-        aicode_dir.mkdir(parents=True, exist_ok=True)
-
-        files = adapter.render_aicode_files(p)
-
-        for filename, content in files.items():
-            target = aicode_dir / filename
-            target.write_text(content, encoding="utf-8")
-            self._created.append(str(target.relative_to(self._root)))
-
     # ── .ai/ 跨工具资产 ──────────────────────────────────
 
     def _generate_ai_assets(self) -> None:
-        """Step 11: 初始化 .ai 跨工具资产。"""
+        """初始化 .ai/ 目录及所有子资产。"""
         ai_dir = self._root / ".ai"
         ai_dir.mkdir(parents=True, exist_ok=True)
 
-        # .ai/memory.md — 空模板
-        memory_file = ai_dir / "memory.md"
-        if not memory_file.exists():
-            memory_content = self._render_memory_template()
-            memory_file.write_text(memory_content, encoding="utf-8")
-            self._created.append(".ai/memory.md")
+        self._init_memory_structure(ai_dir)
+        self._init_scenarios(ai_dir)
 
-        # .ai/scenarios/
-        scenarios_dir = ai_dir / "scenarios"
-        scenarios_dir.mkdir(parents=True, exist_ok=True)
-        readme = scenarios_dir / "README.md"
-        if not readme.exists():
-            readme.write_text(
-                "# 验证场景\n\n"
-                "此目录存放 AI Coding Loop 的验证场景文件。\n\n"
-                "场景定义格式见 `.ai/scenarios/example.yaml`。\n"
-                "当任务涉及接口行为变更或数据库状态变更时，"
-                "需要编写对应的验证场景。\n",
-                encoding="utf-8",
-            )
+        # .ai/config.yaml — 项目公共配置
+        config_path = ai_dir / "config.yaml"
+        if not config_path.exists():
+            self._write_yaml(config_path, {
+                "version": 1,
+                "project": self.profile.project_name,
+                "language": self.profile.language,
+                "test_framework": self.profile.test_framework or "",
+                "memory": {
+                    "max_entries": 200,
+                    "draft_stale_days": 30,
+                    "projection_targets": ["claude", "codex", "cursor"],
+                },
+                "loop": {
+                    "default_flow": "full",
+                    "stages": [
+                        "intake", "spec", "plan", "execute",
+                        "verify", "repair", "review", "memory",
+                    ],
+                },
+                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            self._created.append(".ai/config.yaml")
 
         # .ai/fixtures/
         (ai_dir / "fixtures").mkdir(parents=True, exist_ok=True)
@@ -238,43 +211,136 @@ class FileGenerator:
                 encoding="utf-8",
             )
 
-    def _render_memory_template(self) -> str:
-        return "\n".join([
-            "# 项目记忆",
-            "",
-            f"> 初始化: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "> 条目总数: 0",
-            "",
-            "---",
-            "",
-            "## 代码风格",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 通用规则",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 禁止事项",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 历史坑",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 失败模式",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 模块边界",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 架构决策",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 测试经验",
-            "<!-- 暂无条目 -->",
-            "",
-            "## 验证模式",
-            "<!-- 暂无条目 -->",
-            "",
-        ])
+    def _init_memory_structure(self, ai_dir: Path) -> None:
+        """初始化三层记忆目录结构。"""
+        memory_dir = ai_dir / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建子目录
+        for subdir in [
+            "entries",
+            "sessions",
+            "archive/deprecated",
+            "archive/stale",
+            "projections",
+        ]:
+            d = memory_dir / subdir
+            d.mkdir(parents=True, exist_ok=True)
+            (d / ".gitkeep").touch(exist_ok=True)
+
+        # .ai/memory.md — 空索引模板
+        index_path = ai_dir / "memory.md"
+        if not index_path.exists():
+            now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            index_path.write_text(
+                "# 项目记忆\n"
+                "\n"
+                f"> 更新: {now} | 总计: 0 | confirmed: 0 | draft: 0 | deprecated: 0\n"
+                "\n"
+                "> 此文件是权威记忆索引，只放高价值摘要，不放长文。\n"
+                "> 详细正文在 .ai/memory/entries/ 下。\n"
+                "\n"
+                "## 通用规则\n\n<!-- 暂无条目 -->\n\n"
+                "## 历史坑\n\n<!-- 暂无条目 -->\n\n"
+                "## 验证模式\n\n<!-- 暂无条目 -->\n\n"
+                "## 测试经验\n\n<!-- 暂无条目 -->\n\n"
+                "## 模块边界\n\n<!-- 暂无条目 -->\n\n"
+                "## 架构决策\n\n<!-- 暂无条目 -->\n\n"
+                "## 失败模式\n\n<!-- 暂无条目 -->\n\n"
+                "## 禁止事项\n\n<!-- 暂无条目 -->\n\n"
+                "## 代码风格\n\n<!-- 暂无条目 -->\n",
+                encoding="utf-8",
+            )
+            self._created.append(".ai/memory.md")
+
+        # .ai/memory/stats.json — 运营面板空数据
+        stats_path = memory_dir / "stats.json"
+        if not stats_path.exists():
+            import json
+            stats_path.write_text(json.dumps({
+                "total_entries": 0,
+                "by_category": {},
+                "confirmed": 0,
+                "draft": 0,
+                "deprecated": 0,
+                "archived": 0,
+                "last_updated": now,
+                "last_compression": "",
+                "last_archival": "",
+                "last_projection": "",
+                "hot_tags": [],
+                "cold_entries": [],
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _init_scenarios(self, ai_dir: Path) -> None:
+        """初始化场景目录：config.yaml + example.yaml。"""
+        scenarios_dir = ai_dir / "scenarios"
+        scenarios_dir.mkdir(parents=True, exist_ok=True)
+
+        # config.yaml — 公共配置
+        config_path = scenarios_dir / "config.yaml"
+        if not config_path.exists():
+            self._write_yaml(config_path, {
+                "version": 1,
+                "scenarios_dir": ".ai/scenarios",
+                "fixtures_dir": ".ai/fixtures",
+                "default_sanity_checks": [
+                    {"name": "http-local", "resource": "http", "target": "http://localhost:8080"},
+                ],
+                "execution": {
+                    "timeout_seconds": 60,
+                    "stop_on_first_failure": False,
+                    "cleanup_on_success": True,
+                },
+            })
+            self._created.append(".ai/scenarios/config.yaml")
+
+        # example.yaml — 可工作的场景模板
+        example_path = scenarios_dir / "example.yaml"
+        if not example_path.exists():
+            self._write_yaml(example_path, {
+                "id": "example-health-check",
+                "name": "服务健康检查示例",
+                "description": "验证服务在线并返回正确的 HTTP 状态码",
+                "requires": ["http_service"],
+                "fixtures": [],
+                "steps": [
+                    {
+                        "name": "GET 首页",
+                        "type": "http_call",
+                        "config": {
+                            "method": "GET",
+                            "url": "http://localhost:8080/",
+                        },
+                    },
+                ],
+                "assertions": [
+                    {
+                        "type": "http_status",
+                        "target": "",
+                        "operator": "eq",
+                        "expected": 200,
+                        "message": "首页应返回 200 状态码",
+                    },
+                ],
+                "teardown": [],
+                "metadata": {
+                    "author": "aicode-init",
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                },
+            })
+            self._created.append(".ai/scenarios/example.yaml")
+
+    @staticmethod
+    def _write_yaml(path: Path, data: dict) -> None:
+        """写入 YAML 文件，fallback 到 JSON。"""
+        try:
+            import yaml
+            content = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        except ImportError:
+            import json
+            content = json.dumps(data, ensure_ascii=False, indent=2)
+        path.write_text(content, encoding="utf-8")
 
     # ── 下一步建议 ─────────────────────────────────────────
 

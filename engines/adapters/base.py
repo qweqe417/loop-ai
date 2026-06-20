@@ -39,7 +39,7 @@ class ToolAdapter(ABC):
       - 命令格式 (command_prefix)
       - 模板变量 (template_vars)
       - Hook/MCP 支持声明
-      - 内容渲染方法 (render_main_config, render_rules, render_aicode_files, render_workflow)
+      - 内容渲染方法 (render_main_config)
 
     使用方式:
         adapter = ClaudeCodeAdapter()
@@ -159,22 +159,14 @@ class ToolAdapter(ABC):
     def render_main_config(
         self, profile: ProjectProfile, providers: list[Any] | None = None
     ) -> str:
-        """生成工具的主配置/指令文件内容（CLAUDE.md / instructions.md 等）。"""
-        ...
+        """生成工具的主配置/指令文件内容（CLAUDE.md / instructions.md 等）。
 
-    @abstractmethod
-    def render_rules(self, profile: ProjectProfile) -> dict[str, str]:
-        """返回 {文件名: 内容} 的规则文件映射。"""
-        ...
-
-    @abstractmethod
-    def render_aicode_files(self, profile: ProjectProfile) -> dict[str, str]:
-        """返回 {文件名: 内容} 的项目地图/风格摘要/工作流等。"""
-        ...
-
-    @abstractmethod
-    def render_workflow(self, profile: ProjectProfile) -> str:
-        """生成工作流说明（命令格式跟随当前工具）。"""
+        包含：
+        - 项目技术栈摘要
+        - 关键目录
+        - AI 自行生成规范文件的指令
+        - 命令入口
+        """
         ...
 
     # ── MCP 配置生成 ──
@@ -213,7 +205,7 @@ class ToolAdapter(ABC):
         "aicode-direct": "小改动的快速通道 (跳过 Spec/Plan)",
         "aicode-verify": "场景验证 — 执行验证场景、检查断言、输出报告",
         "aicode-review": "代码审查",
-        "aicode-memory": "项目经验持久化到 .ai/memory.md",
+        "aicode-memory": "项目经验持久化（索引: .ai/memory.md, 明细: .ai/memory/entries/）",
     }
 
     @property
@@ -317,161 +309,22 @@ class ToolAdapter(ABC):
     # ── 共享渲染方法 ──────────────────────────────────────
 
     @staticmethod
-    def _render_code_style_rule(p: Any) -> str:
-        """生成代码风格规则（工具无关）。"""
-        from datetime import datetime
-        style = p.code_style
-        lines = [
-            "# 代码风格规范",
-            "",
-            f"> 初始状态: {style.status}",
-            f"> 可信度: {style.confidence}",
-            f"> 基于项目扫描自动生成，可通过 `aicode calibrate` 校准",
-            "",
-            "## 命名约定",
-            f"- {style.naming_convention or '遵循语言惯例'}",
-            "",
-            "## 测试命名",
-            f"- {style.test_naming or '遵循框架惯例'}",
-            "",
-            "## 异常处理",
-            f"- {style.exception_pattern or '遵循语言惯例'}",
-            "",
-            "## 日志",
-            f"- {style.logging_framework or '遵循语言惯例'}",
-            "",
-        ]
-        if p.linter_configs:
-            lines.append("## 格式化")
-            for cfg in p.linter_configs:
-                lines.append(f"- 配置: `{cfg}`")
-            lines.append("")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _render_testing_rule(p: Any) -> str:
-        """生成测试规范（工具无关）。"""
-        lines = [
-            "# 测试规范",
-            "",
-            "## 测试框架",
-            f"- {p.test_framework}",
-            f"- 运行命令: `{p.test_runner_command}`",
-            "",
-            "## 测试目录",
-        ]
-        for d in p.test_dirs:
-            lines.append(f"- `{d}/`")
-        lines.append("")
-        lines.append("## 测试类型")
-        lines.append(f"- 单元测试: {'已检测' if p.has_unit_tests else '未检测到'}")
-        lines.append(f"- 集成测试: {'已检测' if p.has_integration_tests else '未检测到'}")
-        lines.append(f"- E2E: {'已检测' if p.has_e2e_tests else '未检测到'}")
-        lines.append("")
-        if p.has_docker_compose:
-            lines.append("## Docker Compose")
-            lines.append("- 检测到 docker-compose，可能用于测试环境")
-            lines.append("")
-        lines.append("## 验证原则")
-        lines.append("- 测试应可独立运行，不依赖特定顺序")
-        lines.append("- 不删除或弱化已有测试断言")
-        lines.append("- 新增功能应有对应测试")
-        lines.append("")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _render_safety_rule() -> str:
-        """生成安全约束（工具无关）。"""
+    def _render_rules_generation_instruction(adapter_name: str, rules_dir: str) -> str:
+        """生成让 AI 自行创建规范文件的指令。"""
         return "\n".join([
-            "# 安全约束",
+            "## 规范文件生成",
             "",
-            "## 禁止事项",
+            f"本项目尚未生成详细规范文件。请 AI 在首次处理任务时，",
+            f"根据项目的**实际代码**（而非通用模板）生成以下规范文件到 `{rules_dir}/`：",
             "",
-            "- **禁止** 修改 `.claude/settings.json` 的 allow 列表",
-            "- **禁止** 删除测试断言或 skip 测试来让测试通过",
-            "- **禁止** 修改超出授权范围的文件",
-            "- **禁止** 引入未在 Plan 中声明的新依赖",
-            "- **禁止** 操作生产环境数据库",
-            "- **禁止** 执行 DDL / DROP / TRUNCATE",
-            "- **禁止** 硬编码密钥或敏感信息",
+            f"- `{rules_dir}/code-style.md` — 基于项目实际代码的命名约定、代码组织方式、异常处理模式、日志风格",
+            f"- `{rules_dir}/testing.md` — 基于项目现有测试的测试框架、测试目录、命名规范、Mock 方式",
+            f"- `{rules_dir}/safety.md` — 安全约束：禁止修改的文件、禁止的操作、修改边界",
             "",
-            "## 修改边界",
-            "",
-            "AI 修改代码前必须声明：",
-            "- 计划修改哪些文件",
-            "- 不修改哪些文件",
-            "- 修改理由",
-            "- 验证方式",
-            "",
-            "## Guard 规则",
-            "",
-            "每次修改前后自动运行 Guard 检查：",
-            "- 修改范围是否越界",
-            "- 风险等级是否匹配",
-            "- 基础冒烟检查是否通过",
-            "",
-        ])
-
-    @staticmethod
-    def _render_project_map(p: Any) -> str:
-        """生成项目地图（工具无关）。"""
-        from datetime import datetime
-        lines = [
-            f"# {p.project_name} — 项目地图",
-            "",
-            f"> 自动生成于: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"> 语言: {p.language} | 框架: {p.framework}",
-            "",
-            "## 目录结构",
-            "",
-        ]
-        for d in p.source_dirs:
-            lines.append(f"- `{d}/` — **源代码**")
-        for d in p.test_dirs:
-            lines.append(f"- `{d}/` — **测试**")
-        for d in p.config_dirs:
-            lines.append(f"- `{d}/` — **配置**")
-        for d in p.migration_dirs:
-            lines.append(f"- `{d}/` — **数据库迁移**")
-
-        lines.append("")
-        lines.append("## 入口文件")
-        for f in p.entry_files:
-            lines.append(f"- `{f}`")
-        if not p.entry_files:
-            lines.append("- 未自动识别")
-
-        lines.append("")
-        lines.append("## 外部资源")
-        if p.resources:
-            for r in p.resources:
-                lines.append(f"- **{r.name}** ({r.type}) — 来源: {r.evidence}")
-        else:
-            lines.append("- 未检测到外部资源")
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def _render_style_summary(p: Any) -> str:
-        """生成代码风格摘要（工具无关）。"""
-        style = p.code_style
-        return "\n".join([
-            f"# {p.project_name} — 代码风格摘要",
-            "",
-            f"> 初始状态: {style.status} | 可信度: {style.confidence}",
-            f"> 使用 `aicode calibrate` 确认或修正规则",
-            "",
-            "## 命名",
-            f"- {style.naming_convention or '未识别'}",
-            "",
-            "## 异常处理",
-            f"- {style.exception_pattern or '未识别'}",
-            "",
-            "## 日志",
-            f"- {style.logging_framework or '未识别'}",
-            "",
-            "## 格式化",
-            f"- {style.formatter or '未识别'}",
-            *(f"- 配置文件: `{c}`" for c in p.linter_configs),
+            "生成规则：",
+            "1. **不要使用模板或假设** — 必须通过阅读项目现有代码来推断",
+            "2. 每个规则必须有项目实际代码中的例子作为依据",
+            "3. 优先采用项目已有的 lint 配置、格式化配置",
+            "4. 文件长度不超过 80 行",
             "",
         ])

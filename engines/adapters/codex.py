@@ -134,52 +134,16 @@ class CodexAdapter(ToolAdapter):
                 lines.append(instructions)
             lines.append("")
 
-        lines.append("## Rules")
-        lines.append("- `.codex/skills/aicode-rules/code-style.md`")
-        lines.append("- `.codex/skills/aicode-rules/testing.md`")
-        lines.append("- `.codex/skills/aicode-rules/safety.md`")
-        lines.append("- `.ai/memory.md`")
+        # 规范文件生成指令
+        if providers:
+            lines.append("")
+        lines.append(self._render_rules_generation_instruction(
+            self.display_name, self.rules_dir
+        ))
+        lines.append("- `.ai/memory.md` — 项目记忆索引")
         lines.append("")
 
         return "\n".join(lines)
-
-    def render_rules(self, profile: ProjectProfile) -> dict[str, str]:
-        p = profile
-        return {
-            "code-style.md": self._render_code_style_rule(p),
-            "testing.md": self._render_testing_rule(p),
-            "safety.md": self._render_safety_rule(),
-        }
-
-    def render_aicode_files(self, profile: ProjectProfile) -> dict[str, str]:
-        p = profile
-        return {
-            "project-map.md": self._render_project_map(p),
-            "style.md": self._render_style_summary(p),
-            "workflow.md": self.render_workflow(p),
-        }
-
-    def render_workflow(self, profile: ProjectProfile) -> str:
-        cp = self.command_prefix
-        return "\n".join([
-            "# AI Coding Loop — Workflow",
-            "",
-            "## Modes",
-            "",
-            "| Mode | Command | When |",
-            "|------|---------|------|",
-            f"| Full | `{cp}aicode-full` | L3-L5 features |",
-            f"| Dev | `{cp}aicode-dev` | Existing Spec/Plan |",
-            f"| Test | `{cp}aicode-test` | Verify+Repair |",
-            f"| Direct | `{cp}aicode-direct` | L1-L2 small changes |",
-            f"| Spec | `{cp}aicode-spec` | Spec only |",
-            f"| Review | `{cp}aicode-review` | PR review |",
-            f"| Memory | `{cp}aicode-memory` | Persist learnings |",
-            "",
-            "## Stages",
-            "INTAKE → SPEC → PLAN → EXECUTE → VERIFY → REPAIR → REVIEW → MEMORY",
-            "",
-        ])
 
     # ── MCP 配置 ──
 
@@ -292,11 +256,15 @@ class CodexAdapter(ToolAdapter):
     def _get_aicode_commands(self) -> list[str]:
         cp = self.command_prefix
         return [
-            f"{cp}aicode-full — full dev loop",
+            f"{cp}aicode-init — project init",
+            f"{cp}aicode-calibrate — calibrate rules",
+            f"{cp}aicode-spec — generate spec",
+            f"{cp}aicode-plan — generate plan",
+            f"{cp}aicode-full — full 8-stage loop",
             f"{cp}aicode-dev — dev mode",
             f"{cp}aicode-test — test mode",
-            f"{cp}aicode-spec — generate spec",
             f"{cp}aicode-direct — quick path",
+            f"{cp}aicode-verify — scenario verification",
             f"{cp}aicode-review — code review",
             f"{cp}aicode-memory — persist learnings",
         ]

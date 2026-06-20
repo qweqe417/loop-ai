@@ -108,7 +108,8 @@ class ProjectProfile(BaseModel):
 
     # 工具环境（通用）
     detected_tools: list[str] = Field(default_factory=list, description="检测到的 AI 工具: claude_code / codex / cursor")
-    detected_plugins: list[PluginInfo] = Field(default_factory=list, description="检测到的 AI Coding Loop 插件")
+    detected_plugins: list[PluginInfo] = Field(default_factory=list, description="检测到的外部插件")
+    internal_modules: dict[str, bool] = Field(default_factory=dict, description="引擎内部模块可用性")
     missing_required: list[str] = Field(default_factory=list, description="缺失的必需插件")
     missing_recommended: list[str] = Field(default_factory=list, description="缺失的推荐插件")
 

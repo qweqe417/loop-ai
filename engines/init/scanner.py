@@ -185,68 +185,140 @@ class ProjectScanner:
             details={"tools": p.detected_tools},
         )
 
-    # ── Step 3-4: 检测插件 ──────────────────────────────────
+    # ── Step 3-4: 检测插件与内部模块 ───────────────────────────
 
     def detect_plugins(self) -> ScanResult:
-        """Step 3-4: 检测 AI Coding Loop 插件。"""
+        """Step 3-4: 检测外部插件和内部模块。
+
+        外部插件 — 通过全局插件缓存检测（~/.claude/plugins/cache/）。
+        内部模块 — 引擎自带能力，检测是否可 import。
+        """
         p = self._profile
 
-        required_plugins = [
-            ("scenario-runner", True),
-            ("guard-engine", True),
-            ("memory-store", True),
-            ("superpowers-provider", False),
-        ]
+        # ── 外部插件（全局安装，非项目级） ──
+        plugins_cache = Path.home() / ".claude" / "plugins" / "cache"
 
-        for plugin_name, required in required_plugins:
-            installed = self._check_plugin(plugin_name)
+        external_plugins = {
+            "superpowers": {
+                "path": "claude-plugins-official/superpowers",
+                "required": False,
+                "label": "Superpowers 技能库",
+            },
+            "andrej-karpathy-skills": {
+                "path": "karpathy-skills/andrej-karpathy-skills",
+                "required": False,
+                "label": "Andrej Karpathy 行为规范",
+            },
+            "codegraph": {
+                "path": None,  # MCP-based，单独检测
+                "required": False,
+                "label": "CodeGraph 代码知识图谱",
+            },
+        }
+
+        for plugin_id, cfg in external_plugins.items():
+            installed = self._check_external_plugin(plugin_id, cfg.get("path"), plugins_cache)
             info = PluginInfo(
-                name=plugin_name,
+                name=plugin_id,
                 installed=installed,
-                required=required,
+                required=cfg["required"],
                 available=installed,
             )
             p.detected_plugins.append(info)
             if not installed:
-                if required:
-                    p.missing_required.append(plugin_name)
-                else:
-                    p.missing_recommended.append(plugin_name)
+                p.missing_recommended.append(f"{plugin_id} ({cfg['label']})")
 
+        # ── 内部模块（引擎自带，不算插件） ──
+        internal_modules = {
+            "scenario-runner": ("engines.scenario", "ScenarioRunner"),
+            "guard-engine": ("engines.guard", "Guard"),
+            "memory-store": ("engines.memory", "MemoryStore"),
+        }
+        p.internal_modules = {}
+        for mod_name, (module_path, class_name) in internal_modules.items():
+            p.internal_modules[mod_name] = self._check_module(module_path, class_name)
+
+        installed_count = len([pl for pl in p.detected_plugins if pl.installed])
         return ScanResult(
             step="detect_plugins",
-            success=len(p.missing_required) == 0,
-            message=f"插件检测: {len(p.detected_plugins)} 个, 缺失必需: {len(p.missing_required)}",
+            success=True,
+            message=f"外部插件: {installed_count}/{len(external_plugins)} 已安装, "
+                    f"内部模块: {sum(p.internal_modules.values())}/{len(internal_modules)} 可用",
             details={
-                "installed": [pl.name for pl in p.detected_plugins if pl.installed],
-                "missing_required": p.missing_required,
+                "external_plugins": {
+                    pl.name: "已安装" if pl.installed else "未安装"
+                    for pl in p.detected_plugins
+                },
+                "internal_modules": p.internal_modules,
                 "missing_recommended": p.missing_recommended,
             },
         )
 
-    def _check_plugin(self, name: str) -> bool:
-        """检测单个插件是否可用。"""
-        if name == "scenario-runner":
-            try:
-                from engines.scenario import ScenarioRunner
-                return True
-            except ImportError:
-                return False
-        elif name == "guard-engine":
-            try:
-                from engines.guard import Guard
-                return True
-            except ImportError:
-                return False
-        elif name == "memory-store":
-            try:
-                from engines.memory import MemoryStore
-                return True
-            except ImportError:
-                return False
-        elif name == "superpowers-provider":
-            return self._profile.has_superpowers_dir
+    def _check_external_plugin(
+        self, plugin_id: str, rel_path: str | None, cache_root: Path
+    ) -> bool:
+        """检测外部插件是否已安装。
+
+        - 有 rel_path 的：检查全局插件缓存目录
+        - codegraph：检查 MCP 配置 + 插件缓存
+        """
+        if rel_path:
+            # 检查版本目录（cache/<marketplace>/<plugin>/<version>/）
+            plugin_dir = cache_root / rel_path
+            if plugin_dir.is_dir():
+                # 检查是否有版本子目录
+                for entry in plugin_dir.iterdir():
+                    if entry.is_dir() and (entry / "skills").is_dir():
+                        return True
+                # 直接就是技能目录（无版本层级）
+                if (plugin_dir / "skills").is_dir():
+                    return True
+            return False
+
+        # codegraph: 检查 MCP 配置或插件目录
+        if plugin_id == "codegraph":
+            return self._check_codegraph()
+
         return False
+
+    def _check_codegraph(self) -> bool:
+        """检测 codegraph 是否可用（MCP Server 或插件）。"""
+        # 1. 检查全局 MCP 配置
+        global_mcp = Path.home() / ".claude" / "mcp.json"
+        if global_mcp.exists():
+            try:
+                import json
+                config = json.loads(global_mcp.read_text(encoding="utf-8"))
+                if "codegraph" in config.get("mcpServers", {}):
+                    return True
+            except Exception:
+                pass
+
+        # 2. 检查项目级 MCP 配置
+        project_mcp = self._root / ".claude" / "mcp.json"
+        if project_mcp.exists():
+            try:
+                import json
+                config = json.loads(project_mcp.read_text(encoding="utf-8"))
+                if "codegraph" in config.get("mcpServers", {}):
+                    return True
+            except Exception:
+                pass
+
+        # 3. 检查是否有 .codegraph/ 索引目录
+        if (self._root / ".codegraph").is_dir():
+            return True
+
+        return False
+
+    def _check_module(self, module_path: str, class_name: str) -> bool:
+        """检测内部 Python 模块是否可用。"""
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            return hasattr(mod, class_name)
+        except ImportError:
+            return False
 
     # ── Step 5: 扫描项目结构 ───────────────────────────────
 
