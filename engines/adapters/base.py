@@ -81,12 +81,6 @@ class ToolAdapter(ABC):
         """AI Coding Loop 资产目录: ".claude/aicode" / ".codex/aicode" """
         ...
 
-    @property
-    @abstractmethod
-    def commands_dir(self) -> str | None:
-        """命令入口目录: ".claude/commands" / None（不支持时）"""
-        ...
-
     # ── 子类必须覆写的命令/钩子 ──
 
     @property
@@ -193,62 +187,6 @@ class ToolAdapter(ABC):
         """
         ...
 
-    # ── 全局命令生成 ──
-
-    # 所有 adapter 共享的命令列表 {name: description}
-    ALL_COMMANDS: dict[str, str] = {
-        "aicode-init": "初始化项目 — 扫描技术栈、生成规则和 AI 配置文件",
-        "aicode-calibrate": "校准规则 — 确认、编辑或拒绝 init 生成的推断规则",
-        "aicode-spec": "生成需求规格 — 分析需求并输出 Spec 文档",
-        "aicode-plan": "生成实现方案 — 分析需求并输出可执行的 Plan",
-        "aicode-full": "完整 8 阶段开发流程 (Intake→Spec→Plan→Execute→Verify→Repair→Review→Memory)",
-        "aicode-dev": "已有 Spec/Plan 的开发模式",
-        "aicode-test": "仅验证+修复循环模式",
-        "aicode-direct": "小改动的快速通道 (跳过 Spec/Plan)",
-        "aicode-verify": "场景验证 — 执行验证场景、检查断言、输出报告",
-        "aicode-review": "代码审查",
-        "aicode-memory": "项目经验持久化（索引: .ai/memory.md, 明细: .ai/memory/entries/）",
-    }
-
-    @property
-    @abstractmethod
-    def global_commands_dir(self) -> Path:
-        """全局命令目录 (如 ~/.claude/commands/)。"""
-        ...
-
-    def setup_global(self) -> dict[str, Any]:
-        """生成全局命令文件，安装后自动调用或手动执行。
-
-        幂等：已存在的命令文件跳过。
-        返回 {"created": [...], "skipped": [...], "errors": [...]}
-        """
-        import os
-        created: list[str] = []
-        skipped: list[str] = []
-        errors: list[str] = []
-
-        commands_dir = self.global_commands_dir
-        commands_dir.mkdir(parents=True, exist_ok=True)
-
-        tool_prefix = self.command_prefix.strip("/").strip("@")
-        for cmd_name, description in self.ALL_COMMANDS.items():
-            target = commands_dir / f"{cmd_name}.md"
-            if target.exists():
-                skipped.append(str(target))
-                continue
-            try:
-                content = (
-                    f"# /{cmd_name}\n\n"
-                    f"执行 ai-coding-loop:{cmd_name} 技能。{description}。\n"
-                    f"严格按照 SKILL.md 中定义的步骤操作，不要自行发挥。\n"
-                )
-                target.write_text(content, encoding="utf-8")
-                created.append(str(target))
-            except OSError as exc:
-                errors.append(f"{cmd_name}.md: {exc}")
-
-        return {"created": created, "skipped": skipped, "errors": errors}
-
     # ── 安装 ──
 
     @abstractmethod
@@ -271,10 +209,7 @@ class ToolAdapter(ABC):
 
         用于 init 阶段的冲突检测。
         """
-        patterns = [self.main_config_path, self.rules_dir, self.aicode_dir]
-        if self.commands_dir:
-            patterns.append(self.commands_dir)
-        return [p for p in patterns if p]
+        return [self.main_config_path, self.rules_dir]
 
     # ── 共享工具方法 ──
 

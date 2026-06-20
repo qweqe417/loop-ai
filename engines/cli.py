@@ -150,13 +150,6 @@ def main() -> int:
     p_ctx.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
     p_ctx.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
 
-    # ── setup ────────────────────────────────────
-    p_setup = sub.add_parser("setup", help="生成全局命令文件（安装后自动调用或手动执行）")
-    p_setup.add_argument("--global", dest="global_setup", action="store_true",
-                         default=True, help="全局安装模式（默认）")
-    p_setup.add_argument("--target", default="",
-                         help="目标 AI 工具 (claude_code/codex/cursor)，默认自动检测")
-
     # ── status ───────────────────────────────────
     sub.add_parser("status", help="检查引擎状态")
 
@@ -188,8 +181,6 @@ def _output(data: dict, fmt: str) -> None:
 def _dispatch(args: argparse.Namespace) -> dict:
     if args.command == "init":
         return _cmd_init(args)
-    elif args.command == "setup":
-        return _cmd_setup(args)
     elif args.command == "loop":
         return _cmd_loop(args)
     elif args.command == "verify":
@@ -251,34 +242,6 @@ def _cmd_init(args: argparse.Namespace) -> dict:
         "missing_optional": report.missing_optional,
         "next_steps": report.next_steps,
         "total_duration_ms": report.total_duration_ms,
-    }
-
-
-# ── setup ────────────────────────────────────────
-
-def _cmd_setup(args: argparse.Namespace) -> dict:
-    """生成全局命令文件（幂等）。"""
-    from engines.init import get_adapter
-
-    target_tool = args.target if getattr(args, "target", "") else _detect_tool()
-    try:
-        adapter = get_adapter(target_tool)
-    except ValueError:
-        adapter = get_adapter("claude_code")
-        target_tool = "claude_code"
-
-    start = time.perf_counter()
-    result = adapter.setup_global()
-
-    return {
-        "success": len(result["errors"]) == 0,
-        "target_tool": target_tool,
-        "adapter": adapter.display_name,
-        "commands_dir": str(adapter.global_commands_dir),
-        "files_created": result["created"],
-        "files_skipped": result["skipped"],
-        "errors": result["errors"],
-        "duration_ms": (time.perf_counter() - start) * 1000,
     }
 
 

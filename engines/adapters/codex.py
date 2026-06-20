@@ -44,14 +44,6 @@ class CodexAdapter(ToolAdapter):
         return ".codex/aicode"
 
     @property
-    def commands_dir(self) -> str | None:
-        return None  # Codex 不支持单独的 commands 目录
-
-    @property
-    def global_commands_dir(self) -> Path:
-        return Path.home() / ".codex" / "commands"
-
-    @property
     def skills_dir(self) -> str:
         return ".codex/skills"
 

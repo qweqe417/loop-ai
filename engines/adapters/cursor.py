@@ -44,14 +44,6 @@ class CursorAdapter(ToolAdapter):
         return ".cursor/aicode"
 
     @property
-    def commands_dir(self) -> str | None:
-        return None
-
-    @property
-    def global_commands_dir(self) -> Path:
-        return Path.home() / ".cursor" / "rules"
-
-    @property
     def skills_dir(self) -> str:
         return ".cursor/rules"  # Cursor 规则目录就是 skill 目录
 
