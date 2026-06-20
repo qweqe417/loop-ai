@@ -37,7 +37,7 @@ class CodexAdapter(ToolAdapter):
 
     @property
     def rules_dir(self) -> str:
-        return ".codex/skills/aicode-rules"
+        return ".codex/rules"
 
     @property
     def aicode_dir(self) -> str:
@@ -103,47 +103,14 @@ class CodexAdapter(ToolAdapter):
     def render_main_config(
         self, profile: ProjectProfile, providers: list[Any] | None = None
     ) -> str:
-        p = profile
-        lines = [
-            f"# {p.project_name} — Project Instructions",
-            "",
-            "## Tech Stack",
-            f"- Language: {p.language}",
-            f"- Framework: {p.framework}",
-            f"- Package Manager: {p.package_manager}",
-            "",
-        ]
-
-        if p.source_dirs:
-            lines.append("## Key Directories")
-            for d in p.source_dirs:
-                lines.append(f"- `{d}/` — source")
-            for d in p.test_dirs:
-                lines.append(f"- `{d}/` — tests")
-            lines.append("")
-
-        lines.append("## AI Coding Loop Commands")
-        for cmd in self._get_aicode_commands():
-            lines.append(f"- `{cmd}`")
-        lines.append("")
-
-        if providers:
-            lines.append("## External Integrations")
-            for pv in providers:
-                instructions = self.render_skill(pv.get_ai_instructions())
-                lines.append(instructions)
-            lines.append("")
-
-        # 规范文件生成指令
-        if providers:
-            lines.append("")
-        lines.append(self._render_rules_generation_instruction(
-            self.display_name, self.rules_dir
-        ))
-        lines.append("- `.ai/memory.md` — 项目记忆索引")
-        lines.append("")
-
-        return "\n".join(lines)
+        """生成 .codex/instructions.md 自举引导文件 —— Python 只写 prompt，AI 负责生成完整配置。"""
+        return self._render_bootstrap_prompt(
+            project_name=profile.project_name,
+            tool_display_name=self.display_name,
+            main_config_path=self.main_config_path,
+            rules_dir=self.rules_dir,
+            command_prefix=self.command_prefix,
+        )
 
     # ── MCP 配置 ──
 
@@ -175,46 +142,14 @@ class CodexAdapter(ToolAdapter):
         plugin_root: Path,
         providers: list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Codex 安装：拷贝 skills、写 MCP 配置。"""
+        """Codex 安装：MCP 配置 / loop-config.json。"""
         created: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
 
         root = Path(project_root)
-        src = Path(plugin_root)
-        skills_src = src / "skills"
 
-        # 1. 拷贝 skill 文件到 .codex/skills/aicode-<name>/SKILL.md（渲染模板变量）
-        if skills_src.exists():
-            for skill_md in skills_src.glob("*.md"):
-                skill_name = skill_md.stem
-                skill_dir = root / ".codex" / "skills" / f"aicode-{skill_name}"
-                skill_dir.mkdir(parents=True, exist_ok=True)
-                dst = skill_dir / "SKILL.md"
-                if dst.exists():
-                    skipped.append(str(dst.relative_to(root)))
-                    continue
-                template = skill_md.read_text(encoding="utf-8")
-                content = self.render_skill(template)
-                dst.write_text(content, encoding="utf-8")
-                created.append(str(dst.relative_to(root)))
-
-        # 2. 安装各 provider 的 skill 文件
-        # Codex 格式: .codex/skills/aicode-{key}/SKILL.md
-        for pv in (providers or []):
-            templates = pv.get_skill_templates()
-            for key, template in templates.items():
-                skill_dir = root / ".codex" / "skills" / f"{pv.name}-{key}"
-                skill_dir.mkdir(parents=True, exist_ok=True)
-                dst = skill_dir / "SKILL.md"
-                if dst.exists():
-                    skipped.append(str(dst.relative_to(root)))
-                    continue
-                content = self.render_skill(template)
-                dst.write_text(content, encoding="utf-8")
-                created.append(str(dst.relative_to(root)))
-
-        # 3. MCP 配置
+        # 1. MCP 配置
         all_servers: list[McpServerDef] = []
         for pv in (providers or []):
             all_servers.extend(pv.get_mcp_servers())
@@ -227,14 +162,7 @@ class CodexAdapter(ToolAdapter):
             )
             created.append(str(mcp_dst.relative_to(root)))
 
-        # 4. plugin-root.txt
-        aicode_dir = root / ".codex" / "aicode"
-        aicode_dir.mkdir(parents=True, exist_ok=True)
-        plugin_root_file = aicode_dir / "plugin-root.txt"
-        plugin_root_file.write_text(str(src.resolve()), encoding="utf-8")
-        created.append(str(plugin_root_file.relative_to(root)))
-
-        # 5. 写入 loop-config.json
+        # 2. loop-config.json
         loop_config_dst = root / ".ai" / "loop-config.json"
         loop_config_dst.parent.mkdir(parents=True, exist_ok=True)
         loop_config = {

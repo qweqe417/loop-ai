@@ -109,74 +109,14 @@ class ClaudeCodeAdapter(ToolAdapter):
     def render_main_config(
         self, profile: ProjectProfile, providers: list[Any] | None = None
     ) -> str:
-        """生成 CLAUDE.md（60-100 行）。"""
-        p = profile
-        lines = [
-            f"# {p.project_name} — 项目说明",
-            "",
-            "## 技术栈",
-            f"- 语言: {p.language}",
-            f"- 框架: {p.framework}",
-            f"- 包管理: {p.package_manager}",
-        ]
-
-        # 关键目录
-        if p.source_dirs or p.test_dirs or p.config_dirs or p.migration_dirs:
-            lines.append("")
-            lines.append("## 关键目录")
-            for d in p.source_dirs:
-                lines.append(f"- `{d}/` — 源代码")
-            for d in p.test_dirs:
-                lines.append(f"- `{d}/` — 测试")
-            for d in p.config_dirs:
-                lines.append(f"- `{d}/` — 配置")
-            for d in p.migration_dirs:
-                lines.append(f"- `{d}/` — 数据库迁移")
-
-        # 必须遵守的硬规则
-        lines.append("")
-        lines.append("## 必须遵守的规则")
-        lines.append("")
-        self._append_language_rules(lines, p)
-
-        # 禁止行为
-        lines.append("")
-        lines.append("## 禁止行为")
-        lines.append("")
-        lines.append("- **禁止** 修改 `.claude/settings.json` 的 allow 列表")
-        lines.append("- **禁止** 删除测试断言或 skip 测试来让测试通过")
-        lines.append("- **禁止** 修改超出授权范围的文件")
-        lines.append("- **禁止** 引入未在 Plan 中声明的新依赖")
-
-        # 命令入口
-        lines.append("")
-        lines.append("## AI Coding Loop 命令")
-        lines.append("")
-        lines.append("本项目已集成 AI Coding Loop 插件，可用命令：")
-        for cmd in self._get_aicode_commands():
-            lines.append(f"- `{cmd}`")
-
-        # Provider 集成说明
-        if providers:
-            lines.append("")
-            lines.append("## 集成的外部能力")
-            lines.append("")
-            for pv in providers:
-                instructions = self.render_skill(pv.get_ai_instructions())
-                lines.append(instructions)
-
-        # 规范文件生成指令
-        lines.append("")
-        lines.append(self._render_rules_generation_instruction(
-            self.display_name, self.rules_dir
-        ))
-        lines.append("- `.ai/memory.md` — 项目记忆索引（摘要层）")
-
-        lines.append("")
-        lines.append("<!-- AI_CODING_LOOP_MEMORY_START -->")
-        lines.append("<!-- AI_CODING_LOOP_MEMORY_END -->")
-
-        return "\n".join(lines)
+        """生成 CLAUDE.md 自举引导文件 —— Python 只写 prompt，AI 负责生成完整配置。"""
+        return self._render_bootstrap_prompt(
+            project_name=profile.project_name,
+            tool_display_name=self.display_name,
+            main_config_path=self.main_config_path,
+            rules_dir=self.rules_dir,
+            command_prefix=self.command_prefix,
+        )
 
     # ── MCP 配置 ──
 
@@ -245,40 +185,14 @@ class ClaudeCodeAdapter(ToolAdapter):
         plugin_root: Path,
         providers: list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Claude Code 安装：拷贝 skills、写 hooks、写 plugin-root.txt。"""
+        """Claude Code 安装：MCP 配置 / loop-config.json。"""
         created: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
 
         root = Path(project_root)
-        src = Path(plugin_root)
 
-        # 1. 拷贝 skill 文件到 .claude/skills/（渲染模板变量）
-        skills_src = src / "skills"
-        skills_dst = root / ".claude" / "skills"
-        if skills_src.exists():
-            skills_dst.mkdir(parents=True, exist_ok=True)
-            for skill_md in skills_src.glob("*.md"):
-                dst = skills_dst / skill_md.name
-                if dst.exists():
-                    skipped.append(f"{skill_md.name} (已存在)")
-                    continue
-                template = skill_md.read_text(encoding="utf-8")
-                content = self.render_skill(template)
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(content, encoding="utf-8")
-                created.append(str(dst.relative_to(root)))
-
-        # 2. 写入 hooks.json
-        hooks_dst = root / "hooks" / "hooks.json"
-        hooks_config = self.generate_hooks(providers or [])
-        hooks_dst.parent.mkdir(parents=True, exist_ok=True)
-        hooks_dst.write_text(
-            json.dumps(hooks_config, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        created.append(str(hooks_dst.relative_to(root)))
-
-        # 3. 写入 MCP 配置
+        # 1. MCP 配置
         all_servers: list[McpServerDef] = []
         for pv in (providers or []):
             all_servers.extend(pv.get_mcp_servers())
@@ -291,14 +205,7 @@ class ClaudeCodeAdapter(ToolAdapter):
             )
             created.append(str(mcp_dst.relative_to(root)))
 
-        # 4. 写入 plugin-root.txt（回退用）
-        aicode_dir = root / ".claude" / "aicode"
-        aicode_dir.mkdir(parents=True, exist_ok=True)
-        plugin_root_file = aicode_dir / "plugin-root.txt"
-        plugin_root_file.write_text(str(src.resolve()), encoding="utf-8")
-        created.append(str(plugin_root_file.relative_to(root)))
-
-        # 5. 写入 loop-config.json（运行时 CLI 读取，知道当前工具和命令格式）
+        # 2. loop-config.json（运行时 CLI 读取，知道当前工具和命令格式）
         loop_config_dst = root / ".ai" / "loop-config.json"
         loop_config_dst.parent.mkdir(parents=True, exist_ok=True)
         loop_config = {
@@ -310,40 +217,12 @@ class ClaudeCodeAdapter(ToolAdapter):
         )
         created.append(str(loop_config_dst.relative_to(root)))
 
-        # 6. 安装各 provider 的文件
-        for pv in (providers or []):
-            self._install_provider_files(pv, root, created, skipped, errors)
-
         return {
             "success": len(errors) == 0,
             "files_created": created,
             "files_skipped": skipped,
             "errors": errors,
         }
-
-    def _install_provider_files(
-        self,
-        provider: Any,
-        root: Path,
-        created: list[str],
-        skipped: list[str],
-        errors: list[str],
-    ) -> None:
-        """安装单个 provider 的 skill 文件到 .claude/skills/。
-
-        Claude Code 格式: .claude/skills/{provider_name}-{key}.md
-        """
-        templates = provider.get_skill_templates()
-        for key, template in templates.items():
-            filename = f"{provider.name}-{key}.md"
-            dst = root / ".claude" / "skills" / filename
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                skipped.append(str(dst.relative_to(root)))
-                continue
-            content = self.render_skill(template)
-            dst.write_text(content, encoding="utf-8")
-            created.append(str(dst.relative_to(root)))
 
     # ── 私有辅助 ──
 

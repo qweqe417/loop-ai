@@ -101,9 +101,13 @@ def main() -> int:
     p_init.add_argument("--target", default="claude_code",
                         choices=["claude_code", "codex", "cursor"],
                         help="目标 AI 工具 (默认: claude_code)")
+    p_init.add_argument("--project-root", default="",
+                        help="项目根目录，默认为当前工作目录")
     p_init.add_argument("--scan-only", action="store_true")
     p_init.add_argument("--generate", action="store_true")
     p_init.add_argument("--auto-confirm", action="store_true")
+    p_init.add_argument("--assets-only", action="store_true",
+                        help="仅生成 .ai/ 资产 + adapter 安装（AI 已生成配置文件后使用）")
     p_init.add_argument("--format", default="json")
 
     # ── loop ─────────────────────────────────────
@@ -206,7 +210,7 @@ def _dispatch(args: argparse.Namespace) -> dict:
 def _cmd_init(args: argparse.Namespace) -> dict:
     from engines.init import InitRunner
 
-    root = PROJECT_ROOT
+    root = Path(args.project_root) if getattr(args, "project_root", "") else Path.cwd()
     target_tool = getattr(args, "target", "claude_code")
     runner = InitRunner(project_root=root, target_tool=target_tool)
     start = time.perf_counter()
@@ -220,6 +224,18 @@ def _cmd_init(args: argparse.Namespace) -> dict:
             "adapter": runner.adapter.display_name,
             "profile": profile.model_dump(),
             "duration_ms": (time.perf_counter() - start) * 1000,
+        }
+
+    if args.assets_only:
+        report = runner.run_assets_only()
+        return {
+            "success": report.success,
+            "action": "assets_only",
+            "target_tool": target_tool,
+            "adapter": runner.adapter.display_name,
+            "files_created": report.files_created,
+            "files_skipped": report.files_skipped,
+            "total_duration_ms": report.total_duration_ms,
         }
 
     report = runner.run(auto_confirm=args.auto_confirm, install_missing=False)

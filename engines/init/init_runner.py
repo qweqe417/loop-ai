@@ -1,7 +1,7 @@
 """InitRunner —— init 流程编排器。
 
-编排 aicode init 的 12 步完整流程：
-扫描 → 检测 → 选择工具适配器 → 生成 → 报告
+编排 aicode init 的完整流程：
+扫描 → 检测 → 选择工具适配器 → 生成 → 安装 → 报告
 
 核心变化：支持 --target 参数选择目标 AI 工具，
 所有工具特定逻辑通过 ToolAdapter 处理。
@@ -70,7 +70,8 @@ class InitRunner:
 
     用法:
         runner = InitRunner(project_root="/path/to/project", target_tool="claude_code")
-        report = runner.run()                        # 默认交互模式
+        report = runner.run()                        # 完整流程（bootstrap 模式）
+        report = runner.run_assets_only()            # 仅 .ai/ 资产 + install
         report = runner.run(install_missing=True)    # 自动安装
         report = runner.run(auto_confirm=True)       # 跳过确认
     """
@@ -107,6 +108,10 @@ class InitRunner:
     ) -> InitReport:
         """执行完整 init 流程。
 
+        Python 只负责：扫描 + .ai/ 资产 + adapter 安装。
+        主配置文件和规则文件（CLAUDE.md / rules/*.md）由 AI 通过
+        `/aicode-init` SKILL.md 直接写入 —— Python 不碰配置内容。
+
         Args:
             install_missing: 是否自动安装缺失插件
             auto_confirm: 是否跳过确认步骤（非交互模式）
@@ -115,7 +120,7 @@ class InitRunner:
         self._steps = []
         start = time.perf_counter()
 
-        # Step 1-8: 扫描
+        # 扫描
         if profile is not None:
             profile.target_tool = self._target_tool
         else:
@@ -137,20 +142,19 @@ class InitRunner:
                     warnings=profile.missing_required,
                 ))
 
-        # Step 10-11: 生成文件（通过 adapter）
+        # 生成 .ai/ 资产（memory / scenarios / config.yaml 等）
+        # 注意：不生成 CLAUDE.md / rules/*.md —— 这些由 AI 写入
         self._generator = FileGenerator(
             profile,
             project_root=self._root,
             adapter=self._adapter,
             providers=self._providers,
         )
-
         created = self._generator.generate_all()
-
         self._steps.append(ScanResult(
             step="generate_files",
             success=True,
-            message=f"生成了 {len(created)} 个文件（目标: {self._adapter.display_name}）",
+            message=f"生成了 {len(created)} 个 .ai/ 资产文件（目标: {self._adapter.display_name}）",
             details={
                 "files": created,
                 "target_tool": self._target_tool,
@@ -158,7 +162,10 @@ class InitRunner:
             },
         ))
 
-        # Step 12: 报告
+        # 安装 adapter 文件（MCP 配置 / loop-config.json / plugin-root.txt）
+        self._run_install(profile)
+
+        # Step 11: 报告
         report = self._generator.build_report()
         report.steps = self._steps
         report.total_duration_ms = (time.perf_counter() - start) * 1000
@@ -179,7 +186,10 @@ class InitRunner:
         return self._scanner.scan_all()
 
     def generate(self, profile: ProjectProfile | None = None) -> InitReport:
-        """只执行文件生成（需要先 scan 或提供 profile）。"""
+        """只执行 .ai/ 资产生成（需要先 scan 或提供 profile）。
+
+        Python 不生成 CLAUDE.md / rules/*.md —— 这些由 AI 写入。
+        """
         p = profile or self._scanner.profile
         p.target_tool = self._target_tool
         self._providers = self._detect_providers(p)
@@ -191,6 +201,39 @@ class InitRunner:
         )
         self._generator.generate_all()
         return self._generator.build_report()
+
+    def run_assets_only(
+        self,
+        *,
+        profile: ProjectProfile | None = None,
+    ) -> InitReport:
+        """仅生成 .ai/ 资产 + adapter.install()，跳过主配置文件生成。
+
+        用于 /aicode-init SKILL.md 流程：
+        AI 已直接写入 CLAUDE.md / rules/*.md 等配置文件，
+        Python 只需初始化 .ai/ 目录结构和 adapter skill/hook/MCP 文件。
+        """
+        start = time.perf_counter()
+
+        p = profile
+        if p is None:
+            p = self._scanner.scan_all()
+        p.target_tool = self._target_tool
+
+        self._providers = self._detect_providers(p)
+
+        self._generator = FileGenerator(
+            p,
+            project_root=self._root,
+            adapter=self._adapter,
+            providers=self._providers,
+        )
+        self._generator.generate_ai_assets_only()
+        self._run_install(p)
+
+        report = self._generator.build_report()
+        report.total_duration_ms = (time.perf_counter() - start) * 1000
+        return report
 
     # ── 内部方法 ──────────────────────────────────────────
 
@@ -291,3 +334,32 @@ class InitRunner:
         except Exception as exc:
             logger.warning("Plugin '%s' install error: %s", name, exc)
             return False
+
+    def _run_install(self, profile: ProjectProfile) -> None:
+        """调用 adapter.install() 安装 MCP 配置 / loop-config / plugin-root。"""
+        try:
+            import sys
+            plugin_root = Path(__file__).resolve().parent.parent.parent
+            result = self._adapter.install(
+                project_root=self._root,
+                plugin_root=plugin_root,
+                providers=self._providers,
+            )
+            if result.get("success"):
+                created = result.get("files_created", [])
+                skipped = result.get("files_skipped", [])
+                self._steps.append(ScanResult(
+                    step="install",
+                    success=True,
+                    message=f"安装了 {len(created)} 个 adapter 文件, 跳过 {len(skipped)} 个",
+                    details=result,
+                ))
+            else:
+                self._steps.append(ScanResult(
+                    step="install",
+                    success=False,
+                    message="adapter.install() 有错误",
+                    warnings=result.get("errors", []),
+                ))
+        except Exception as exc:
+            logger.warning("adapter.install() 异常: %s", exc)

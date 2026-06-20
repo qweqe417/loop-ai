@@ -114,56 +114,14 @@ class CursorAdapter(ToolAdapter):
     def render_main_config(
         self, profile: ProjectProfile, providers: list[Any] | None = None
     ) -> str:
-        p = profile
-        engine = self._engine_root or str(Path(__file__).resolve().parent.parent.parent)
-
-        lines = [
-            f"# {p.project_name} — AI Coding 规则",
-            "",
-            f"> 语言: {p.language} | 框架: {p.framework}",
-            f"> AI Coding Loop 引擎: `{engine}`",
-            "",
-            "## 关键目录",
-        ]
-        for d in p.source_dirs:
-            lines.append(f"- `{d}/` — 源码")
-        for d in p.test_dirs:
-            lines.append(f"- `{d}/` — 测试")
-        lines.append("")
-
-        lines.append("## 必须遵守的规则")
-        self._append_language_rules(lines, p)
-        lines.append("")
-
-        lines.append("## 禁止行为")
-        lines.append("- **禁止** 删除测试断言或 skip 测试来让测试通过")
-        lines.append("- **禁止** 修改超出授权范围的文件")
-        lines.append("- **禁止** 引入未在 Plan 中声明的新依赖")
-        lines.append("")
-
-        lines.append("## AI Coding Loop")
-        lines.append("")
-        lines.append("AI Coding Loop 已集成。使用以下规则引用：")
-        for rule_name in self._get_aicode_rules():
-            lines.append(f"- `{rule_name}`")
-
-        if providers:
-            lines.append("")
-            lines.append("## 集成的外部能力")
-            for pv in providers:
-                instructions = self.render_skill(pv.get_ai_instructions())
-                lines.append(instructions)
-
-        # 规范文件生成指令
-        lines.append("")
-        lines.append(self._render_rules_generation_instruction(
-            self.display_name, self.rules_dir
-        ))
-        lines.append(f"（Cursor 规则文件建议使用 `aicode-` 前缀，如 `aicode-code-style.md`）")
-        lines.append("- `.ai/memory.md` — 项目记忆索引")
-        lines.append("")
-
-        return "\n".join(lines)
+        """生成 .cursor/rules/aicode.md 自举引导文件 —— Python 只写 prompt，AI 负责生成完整配置。"""
+        return self._render_bootstrap_prompt(
+            project_name=profile.project_name,
+            tool_display_name=self.display_name,
+            main_config_path=self.main_config_path,
+            rules_dir=self.rules_dir,
+            command_prefix=self.command_prefix,
+        )
 
     # ── MCP 配置 ──
 
@@ -190,46 +148,16 @@ class CursorAdapter(ToolAdapter):
         plugin_root: Path,
         providers: list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Cursor 安装：写规则文件到 .cursor/rules/。"""
+        """Cursor 安装：MCP 配置 / loop-config.json。"""
         created: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
 
         root = Path(project_root)
         src = Path(plugin_root)
-        self._engine_root = str(src.resolve())
+        self._engine_root = str(src.resolve())  # Cursor 无变量机制，需要绝对路径
 
-        rules_dir = root / ".cursor" / "rules"
-        rules_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1. 安装 loop skill 文件为 .cursor/rules/aicode-{name}.md（渲染模板变量）
-        skills_src = src / "skills"
-        if skills_src.exists():
-            for skill_md in skills_src.glob("*.md"):
-                skill_name = skill_md.stem
-                dst = rules_dir / f"aicode-{skill_name}.md"
-                if dst.exists():
-                    skipped.append(str(dst.relative_to(root)))
-                    continue
-                template = skill_md.read_text(encoding="utf-8")
-                content = self.render_skill(template)
-                dst.write_text(content, encoding="utf-8")
-                created.append(str(dst.relative_to(root)))
-
-        # 2. 安装各 provider 的 rule 文件
-        for pv in (providers or []):
-            templates = pv.get_skill_templates()
-            for key, template in templates.items():
-                filename = f"aicode-{pv.name}-{key}.md"
-                dst = rules_dir / filename
-                if dst.exists():
-                    skipped.append(str(dst.relative_to(root)))
-                    continue
-                content = self.render_skill(template)
-                dst.write_text(content, encoding="utf-8")
-                created.append(str(dst.relative_to(root)))
-
-        # 3. MCP 配置
+        # 1. MCP 配置
         all_servers: list[McpServerDef] = []
         for pv in (providers or []):
             all_servers.extend(pv.get_mcp_servers())
@@ -242,7 +170,7 @@ class CursorAdapter(ToolAdapter):
             )
             created.append(str(mcp_dst.relative_to(root)))
 
-        # 4. 写入 loop-config.json
+        # 2. loop-config.json
         loop_config_dst = root / ".ai" / "loop-config.json"
         loop_config_dst.parent.mkdir(parents=True, exist_ok=True)
         loop_config = {

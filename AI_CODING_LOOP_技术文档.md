@@ -1102,7 +1102,7 @@ open_questions:
 |---------|------------|-----------|--------|
 | `tool_id` | `claude_code` | `codex` | `cursor` |
 | `main_config_path` | `CLAUDE.md` | `.codex/instructions.md` | `.cursor/rules/aicode.md` |
-| `rules_dir` | `.claude/rules` | `.codex/skills/aicode-rules` | `.cursor/rules` |
+| `rules_dir` | `.claude/rules` | `.codex/rules` | `.cursor/rules` |
 | `aicode_dir` | `.claude/aicode` | `.codex/aicode` | `.cursor/aicode` |
 | `commands_dir` | `.claude/commands` | None | None |
 | `command_prefix` | `/` | `/` | `@` |
@@ -1127,7 +1127,7 @@ render_skill(template)     → 渲染模板变量
 | 产物 | Claude Code | Codex CLI | Cursor |
 |------|------------|-----------|--------|
 | 主配置 | `CLAUDE.md` | `.codex/instructions.md` | `.cursor/rules/aicode.md` |
-| Rules | `.claude/rules/*.md` | `.codex/skills/aicode-rules/*.md` | `.cursor/rules/aicode-*.md` |
+| Rules | `.claude/rules/*.md` | `.codex/rules/*.md` | `.cursor/rules/aicode-*.md` |
 | Skills | `.claude/skills/*.md` | `.codex/skills/aicode-*/SKILL.md` | `.cursor/rules/aicode-*.md` |
 | Hooks | `hooks/hooks.json` | — | — |
 | MCP | `.claude/mcp.json` | `.codex/mcp.json` | `.cursor/mcp.json` |

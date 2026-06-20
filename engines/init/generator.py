@@ -59,24 +59,32 @@ class FileGenerator:
         return self._adapter
 
     def generate_all(self) -> list[str]:
-        """生成所有文件，返回已创建的文件路径列表。"""
+        """生成所有文件，返回已创建的文件路径列表。
+
+        注意：不含主配置文件和规则文件 —— 这些由 AI 通过 SKILL.md 直接写入。
+        Python 只负责 .ai/ 资产目录。
+        """
         self._created = []
         self._skipped = []
         self._merged = []
 
-        adapter = self.adapter
-
-        self._generate_main_config()
         self._generate_ai_assets()
 
         logger.info(
             "Generated %d files for %s, skipped %d, merged %d",
             len(self._created),
-            adapter.display_name,
+            self.adapter.display_name,
             len(self._skipped),
             len(self._merged),
         )
         return self._created
+
+    def generate_ai_assets_only(self) -> list[str]:
+        """仅生成 .ai/ 跨工具资产（与 generate_all() 等价）。
+
+        Python 不生成配置内容 —— 所有 CLAUDE.md / rules/*.md 由 AI 写入。
+        """
+        return self.generate_all()
 
     def build_report(self) -> InitReport:
         """构建 InitReport。"""
@@ -95,69 +103,6 @@ class FileGenerator:
             total_duration_ms=p.scan_duration_ms,
         )
         return report
-
-    # ── 主配置 ──────────────────────────────────────────
-
-    def _generate_main_config(self) -> None:
-        """生成工具的主配置文件（CLAUDE.md / .codex/instructions.md 等）。"""
-        p = self.profile
-        adapter = self.adapter
-        target_path = self._root / adapter.main_config_path
-
-        # 检测是否已有来自当前工具或其他工具的配置
-        if target_path.exists():
-            logger.info("%s exists, skipping (would merge)", adapter.main_config_path)
-            self._skipped.append(f"{adapter.main_config_path} (已存在，建议手动合并)")
-            self._write_merge_suggestion(target_path)
-            return
-
-        content = adapter.render_main_config(p, self._providers)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
-        self._created.append(adapter.main_config_path)
-        logger.info("Generated: %s", adapter.main_config_path)
-
-    def _write_merge_suggestion(self, existing_path: Path) -> None:
-        """当主配置文件已存在时，生成合并建议。"""
-        adapter = self.adapter
-        suggestion_dir = self._root / adapter.aicode_dir
-        suggestion_dir.mkdir(parents=True, exist_ok=True)
-
-        suggestion = [
-            f"# {adapter.main_config_path} 合并建议",
-            "",
-            f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"> 目标工具: {adapter.display_name}",
-            "",
-            f"检测到已有 `{adapter.main_config_path}`，不做覆盖。",
-            "",
-            "## 建议新增的内容",
-            "",
-            "以下内容建议添加到现有文件中：",
-            "",
-            "### AI Coding Loop 集成",
-            "",
-            f"```markdown",
-            f"## AI Coding Loop 命令",
-            "",
-        ]
-        cp = adapter.command_prefix
-        for cmd in [
-            f"{cp}aicode-full — 完整开发流程",
-            f"{cp}aicode-dev — 开发模式",
-            f"{cp}aicode-test — 测试模式",
-            f"{cp}aicode-spec — 生成 Spec",
-            f"{cp}aicode-direct — 快速通道",
-            f"{cp}aicode-review — 代码审查",
-            f"{cp}aicode-memory — 记忆沉淀",
-        ]:
-            suggestion.append(f"- `{cmd}`")
-        suggestion.append("```")
-        suggestion.append("")
-
-        suggestion_path = suggestion_dir / "merge-suggestion.md"
-        suggestion_path.write_text("\n".join(suggestion), encoding="utf-8")
-        self._created.append(str(suggestion_path.relative_to(self._root)))
 
     # ── .ai/ 跨工具资产 ──────────────────────────────────
 
