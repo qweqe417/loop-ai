@@ -234,6 +234,52 @@ class StageHandler(ABC):
 
         return warnings[:2]
 
+    def _load_specification(self, state: RunState, task_id: str = "") -> dict:
+        """定位 Spec/Plan 文件路径 + 简要摘要（供 superpowers 子Agent 读取）。
+
+        superpowers:subagent-driven-development 内部自己读 plan/spec 文件，
+        这里只提供路径引用，不注入全文（避免冗余 token）。
+        """
+        result: dict = {"spec_path": "", "plan_path": "", "spec_summary": "", "plan_summary": ""}
+
+        try:
+            from pathlib import Path
+            project_root = Path(state.project_root) if state.project_root else Path.cwd()
+
+            # ── Spec 路径 ──
+            spec_dir = project_root / "docs" / "spec"
+            spec_files = sorted(spec_dir.glob("*.md")) if spec_dir.exists() else []
+            if spec_files:
+                latest = max(spec_files, key=lambda p: p.stat().st_mtime)
+                result["spec_path"] = str(latest.relative_to(project_root))
+            else:
+                alt = project_root / ".ai" / "spec.md"
+                if alt.exists():
+                    result["spec_path"] = ".ai/spec.md"
+            if result["spec_path"]:
+                full_path = project_root / result["spec_path"]
+                raw = full_path.read_text(encoding="utf-8")[:1000]
+                lines = [l for l in raw.split("\n") if l.strip() and not l.startswith("#")][:3]
+                result["spec_summary"] = " ".join(lines)[:200] if lines else ""
+
+            # ── Plan 路径 ──
+            plan_dir = project_root / "docs" / "plan"
+            plan_files = sorted(plan_dir.glob("*.md")) if plan_dir.exists() else []
+            if plan_files:
+                latest = max(plan_files, key=lambda p: p.stat().st_mtime)
+                result["plan_path"] = str(latest.relative_to(project_root))
+            else:
+                alt = project_root / ".ai" / "plan.md"
+                if alt.exists():
+                    result["plan_path"] = ".ai/plan.md"
+            if result["plan_path"] and state.plan_contracts and task_id:
+                result["plan_summary"] = f"共 {len(state.plan_contracts)} 个 Task，当前: {task_id}"
+
+        except Exception as exc:
+            logger.debug("Specification path loading unavailable: %s", exc)
+
+        return result
+
 
 # ── 内置阶段处理器 ──────────────────────────────────────────────
 
@@ -494,61 +540,95 @@ class ExecuteHandler(StageHandler):
         if state.plan_lock_state == "breached":
             return self._stop_failure(state, "PlanLock BREACHED — 需要人工介入")
 
-        # 5. 构造 AI prompt — 精简指令 + 结构化字段
-        #    instruction 只含目标概述，约束数据在独立字段避免重复
-        checklist = self._build_checklist(contract)
+        # 5. 构造 superpowers 模式 prompt
         preflight = self._load_preflight_warnings(state)
+        specification = self._load_specification(state, task_id=task_id)
 
-        # 大局上下文: 让 AI 知道自己在整个需求中的位置
-        big_picture_parts = [f"整体目标: {contract.get('goal', contract.get('title', ''))}"]
-        if state.task_intake:
-            big_picture_parts.append(f"需求背景: {state.task_intake.reason[:200]}")
-        # 前后 Task 关系
-        if idx > 0:
-            prev = state.plan_contracts[idx - 1]
-            big_picture_parts.append(f"前置 Task 已完成: {prev.get('task_id', '')} — {prev.get('title', '')}")
-        if idx + 1 < total:
-            nxt = state.plan_contracts[idx + 1]
-            big_picture_parts.append(f"后续 Task 依赖本 Task: {nxt.get('task_id', '')} — {nxt.get('title', '')}")
+        # ── 构造 superpowers:subagent-driven-development 指令 ──
+        # 控制器 (你) 负责: 读 Plan/Spec → 为子Agent 组装上下文 → 派发 → 审阅 → 提交
+        plan_ref = specification.get("plan_path", "docs/plan/*.md")
+        spec_ref = specification.get("spec_path", "docs/spec/*.md")
+        position_info = f"{idx + 1}/{total}"
+        depends_str = ", ".join(
+            state.plan_contracts[idx - 1].get("task_id", "") for _ in [0] if idx > 0
+        ) if idx > 0 else "无"
+        requires_str = ", ".join(
+            state.plan_contracts[idx + 1].get("task_id", "") for _ in [0] if idx + 1 < total
+        ) if idx + 1 < total else "无"
 
         instruction_parts = [
-            f"Task {task_id} ({idx + 1}/{total}): {contract.get('goal', contract.get('title', ''))}",
+            f"## Task {task_id} ({position_info}): {contract.get('goal', contract.get('title', ''))}",
             "",
-            "## 大局上下文",
-            *big_picture_parts,
+            "## 执行模式: superpowers:subagent-driven-development",
+            "",
+            "使用 `Skill: superpowers:subagent-driven-development` 执行此 Task。",
+            "**重要: 只执行这一个 Task，不要执行 Plan 中的其他 Task。Python 循环会逐个派发。**",
+            "你作为**控制器**，负责为每个子Agent 组装精准上下文、派发、审阅。",
+            "",
+            "### 你作为控制器的职责",
+            "",
+            f"**1. 读取上下文:**",
+            f"  - Plan 文件: {plan_ref}",
+            f"  - Spec 文件: {spec_ref}",
+            f"  - 相关代码: ContextRouter 已加载，见 `context` 字段",
+            "",
+            "**2. 为实现子Agent 组装 prompt:**",
         ]
+        # Task 内容摘要 — 供 AI 填入子Agent prompt
+        task_summary = contract.get("goal", contract.get("title", ""))
+        allowed = contract.get("allowed_files", [])
+        forbidden = contract.get("forbidden_files", [])
+        budget = contract.get("budget", {})
+        instruction_parts.extend([
+            f"  - Task 目标: {task_summary}",
+            f"  - 修改文件: {allowed}",
+            f"  - 禁止修改: {forbidden}",
+            f"  - 文件数上限: {budget.get('max_files', 3)}",
+            f"  - 行数上限: {budget.get('max_lines', 100)}",
+            f"  - 允许新抽象: {budget.get('allow_new_abstractions', False)}",
+            f"  - 允许新依赖: {budget.get('allow_new_dependencies', False)}",
+            f"  - 位置: 第 {position_info} 个 / 共 {total} 个 Task",
+            f"  - 前置依赖: {depends_str}",
+            f"  - 被依赖: {requires_str}",
+        ])
         if preflight:
-            instruction_parts.extend(["", "## 编码前注意 (来自项目记忆)", *preflight])
+            instruction_parts.extend([
+                "",
+                "**3. 注入子Agent 警告:**",
+                *[f"  - {w}" for w in preflight],
+            ])
         instruction_parts.extend([
             "",
-            "## Implementation Checklist (逐项确认后编码)",
-            *[f"- [ ] {item}" for item in checklist],
+            "**4. 派发审查子Agent:**",
+            "  - Spec 合规审查: 对照 Spec 逐条验证代码（独立子Agent，不信任实现者报告）",
+            "  - 代码质量审查: 检查风格/复用/性能（独立子Agent）",
+            "  - 有问题 → 实现者修复 → 再审 → 直到通过",
             "",
-            "提交格式见 submission_format 字段。",
+            "**5. 提交结果:**",
+            "  按 `submission_format` 结构提交变更摘要 JSON。",
+            f"  整体目标背景: {state.task_intake.reason[:120] if state.task_intake else task_summary}",
         ])
 
         state.pending_action = "execute_task"
         state.pending_prompt = {
             "instruction": "\n".join(instruction_parts),
-            # 结构化字段 — 与 instruction 互补不重复
+            "specification": specification,
+            "context": execute_context,
             "goal_context": {
-                "task_goal": contract.get("goal", contract.get("title", "")),
+                "task_goal": task_summary,
                 "overall_reason": state.task_intake.reason if state.task_intake else "",
-                "position": f"{idx + 1}/{total}",
+                "position": position_info,
                 "depends_on": [state.plan_contracts[idx - 1].get("task_id", "")] if idx > 0 else [],
                 "required_by": [state.plan_contracts[idx + 1].get("task_id", "")] if idx + 1 < total else [],
             },
-            "context": execute_context,
             "preflight_warnings": preflight,
             "task_contract": contract,
             "style_contract": contract.get("style_contract", {}),
-            "reuse_check": contract.get("reuse_check", {}),
-            "implementation_checklist": checklist,
             "budget": {
-                "max_files": contract.get("budget", {}).get("max_files", 3),
-                "max_lines": contract.get("budget", {}).get("max_lines", 100),
-                "allow_new_abstractions": contract.get("budget", {}).get("allow_new_abstractions", False),
-                "allow_new_dependencies": contract.get("budget", {}).get("allow_new_dependencies", False),
+                "max_files": budget.get("max_files", 3),
+                "max_lines": budget.get("max_lines", 100),
+                "allow_new_abstractions": budget.get("allow_new_abstractions", False),
+                "allow_new_dependencies": budget.get("allow_new_dependencies", False),
             },
             "submission_format": {
                 "changed_files": ["path/to/file"],
@@ -2161,6 +2241,7 @@ class DirectExecuteHandler(StageHandler):
             "确定: 不确定的地方是否已标出而非猜测？",
         ]
         preflight = self._load_preflight_warnings(state)
+        specification = self._load_specification(state)
         instruction_parts = [
             f"Direct Mode — 需求: {user_input}",
             f"风险等级: {intake.risk_level if intake else 'L1'}",
@@ -2175,6 +2256,7 @@ class DirectExecuteHandler(StageHandler):
         state.pending_action = "direct_execute"
         state.pending_prompt = {
             "instruction": "\n".join(instruction_parts),
+            "specification": specification,
             "context": direct_context,
             "preflight_warnings": preflight,
             "implementation_checklist": checklist,
