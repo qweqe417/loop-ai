@@ -216,6 +216,10 @@ class LoopRunner:
 
         如果最近 N 个 failure（N=THRESHOLD）具有相同签名，则触发熔断，
         防止 AI 在同一个问题上无限循环浪费 Token。
+
+        双层检测:
+        - 层1 (精确): stage + category + 规范化消息 — 完全相同错误
+        - 层2 (模糊): 仅 category — 同类失败跨阶段的累积效应
         """
         failures = state.failures
         if len(failures) < CIRCUIT_BREAKER_THRESHOLD:
@@ -223,16 +227,19 @@ class LoopRunner:
 
         recent = failures[-CIRCUIT_BREAKER_THRESHOLD:]
 
-        # 层1: 精确签名 (stage + category + message)
+        # 层1: 精确签名 (stage + category + 规范化消息)
         exact_sigs = [self._failure_signature(f) for f in recent]
         if len(set(exact_sigs)) == 1:
             return self._build_breaker_message(recent, "精确", exact_sigs[0])
 
-        # 层2: 跨阶段消息签名 (category + message, 忽略 stage)
-        # 同一根因在不同阶段表现为不同错误时也能被检测
-        message_sigs = [self._failure_message_signature(f) for f in recent]
-        if len(set(message_sigs)) == 1:
-            return self._build_breaker_message(recent, "跨阶段", message_sigs[0])
+        # 层2: 类别签名 (仅 category) — 同一类别错误在 3 个不同阶段累积出现
+        # 用于捕获 "同根因导致不同类型错误" 的模式（如：逻辑错误在
+        # EXECUTE→VALIDATION_FAILURE, VERIFY→TEST_FAILURE, REPAIR→LOGIC_ERROR）
+        category_sigs = [f.category.value for f in recent]
+        if len(set(category_sigs)) == 1:
+            return self._build_breaker_message(
+                recent, "同类", f"category={category_sigs[0]}"
+            )
 
         return None
 
@@ -444,12 +451,37 @@ FLOW_TEST: dict[StageType, StageType | None] = {
     StageType.ABORTED: None,
 }
 
-# 开发模式：EXECUTE → VERIFY → REVIEW → COMPLETED（失败时 handler 覆盖到 REPAIR）
+# 开发模式 (loop): EXECUTE → VERIFY ⇄ REPAIR → REVIEW → MEMORY → COMPLETED
 FLOW_DEV: dict[StageType, StageType | None] = {
     StageType.EXECUTE: StageType.VERIFY,
     StageType.VERIFY: StageType.REVIEW,
     StageType.REPAIR: StageType.VERIFY,
+    StageType.REVIEW: StageType.MEMORY,
+    StageType.MEMORY: StageType.COMPLETED,
+    StageType.COMPLETED: None,
+    StageType.ABORTED: None,
+}
+
+# 开发模式 (standalone): EXECUTE → COMPLETED（仅生成代码，不验证）
+FLOW_DEV_ONLY: dict[StageType, StageType | None] = {
+    StageType.EXECUTE: StageType.COMPLETED,
+    StageType.COMPLETED: None,
+    StageType.ABORTED: None,
+}
+
+# Direct 模式 (loop): DIRECT_EXECUTE → VERIFY ⇄ REPAIR → REVIEW → COMPLETED
+FLOW_DIRECT_LOOP: dict[StageType, StageType | None] = {
+    StageType.DIRECT_EXECUTE: StageType.VERIFY,
+    StageType.VERIFY: StageType.REVIEW,
+    StageType.REPAIR: StageType.VERIFY,
     StageType.REVIEW: StageType.COMPLETED,
+    StageType.COMPLETED: None,
+    StageType.ABORTED: None,
+}
+
+# Direct 模式 (standalone): DIRECT_EXECUTE → COMPLETED（仅生成代码，不验证）
+FLOW_DIRECT_ONLY: dict[StageType, StageType | None] = {
+    StageType.DIRECT_EXECUTE: StageType.COMPLETED,
     StageType.COMPLETED: None,
     StageType.ABORTED: None,
 }
@@ -496,17 +528,50 @@ SUB_LOOP_PRESETS: dict[str, dict] = {
         "max_iterations": DEFAULT_MAX_ITERATIONS,
         "description": "完整 8 阶段流程",
     },
+    # ── Dev: loop + standalone ──
     "dev": {
         "handlers": {
             StageType.EXECUTE: ExecuteHandler(),
             StageType.VERIFY: VerifyHandler(),
             StageType.REPAIR: RepairHandler(),
             StageType.REVIEW: ReviewHandler(),
+            StageType.MEMORY: MemoryHandler(),
         },
         "entry_stage": StageType.EXECUTE,
         "flow": FLOW_DEV,
         "max_iterations": SUB_LOOP_MAX_ITERATIONS,
-        "description": "开发模式：执行→验证→修复→审查（已有 Spec/Plan 时使用）",
+        "description": "Dev 完整 loop：执行→验证↻修复→审查→记忆沉淀",
+    },
+    "dev-only": {
+        "handlers": {
+            StageType.EXECUTE: ExecuteHandler(),
+        },
+        "entry_stage": StageType.EXECUTE,
+        "flow": FLOW_DEV_ONLY,
+        "max_iterations": 10,
+        "description": "Dev standalone：仅生成代码，不验证/审查",
+    },
+    # ── Direct: loop + standalone ──
+    "direct": {
+        "handlers": {
+            StageType.DIRECT_EXECUTE: DirectExecuteHandler(),
+            StageType.VERIFY: VerifyHandler(),
+            StageType.REPAIR: RepairHandler(),
+            StageType.REVIEW: ReviewHandler(),
+        },
+        "entry_stage": StageType.DIRECT_EXECUTE,
+        "flow": FLOW_DIRECT_LOOP,
+        "max_iterations": SUB_LOOP_MAX_ITERATIONS,
+        "description": "Direct 完整 loop：直接执行→验证↻修复→审查",
+    },
+    "direct-only": {
+        "handlers": {
+            StageType.DIRECT_EXECUTE: DirectExecuteHandler(),
+        },
+        "entry_stage": StageType.DIRECT_EXECUTE,
+        "flow": FLOW_DIRECT_ONLY,
+        "max_iterations": 10,
+        "description": "Direct standalone：仅生成代码，不验证/审查",
     },
     "test": {
         "handlers": {
@@ -582,23 +647,6 @@ SUB_LOOP_PRESETS: dict[str, dict] = {
         "flow": FLOW_MEMORY,
         "max_iterations": SUB_LOOP_MAX_ITERATIONS,
         "description": "记忆沉淀：审查→记忆→完成",
-    },
-    "direct": {
-        "handlers": {
-            StageType.DIRECT_EXECUTE: DirectExecuteHandler(),
-            StageType.VERIFY: VerifyHandler(),
-            StageType.REVIEW: ReviewHandler(),
-        },
-        "entry_stage": StageType.DIRECT_EXECUTE,
-        "flow": {
-            StageType.DIRECT_EXECUTE: StageType.VERIFY,
-            StageType.VERIFY: StageType.REVIEW,
-            StageType.REVIEW: StageType.COMPLETED,
-            StageType.COMPLETED: None,
-            StageType.ABORTED: None,
-        },
-        "max_iterations": SUB_LOOP_MAX_ITERATIONS,
-        "description": "Direct Mode：直接执行→验证→审查（小改动快速通道）",
     },
 }
 

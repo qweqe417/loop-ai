@@ -194,6 +194,46 @@ class StageHandler(ABC):
         """跟踪上下文 token 使用量。"""
         state.context_budget_used = (state.context_budget_used or 0) + tokens_used
 
+    def _load_preflight_warnings(self, state: RunState) -> list[str]:
+        """从项目记忆加载编码前反模式提示。
+
+        召回 PITFALL / PROHIBITED / FAILURE_PATTERN 类记忆，
+        优先加载 entries/{id}.md 正文以获得更详细的反模式说明。
+        限制 2 条，每条 ≤ 120 字符。
+        """
+        warnings: list[str] = []
+        try:
+            from pathlib import Path
+            from engines.memory import MemoryCategory
+            from engines.memory.store import MemoryStore
+
+            project_root = Path(state.project_root) if state.project_root else Path.cwd()
+            store = MemoryStore(project_root=project_root)
+            entries = store.recall_by_category(
+                [MemoryCategory.PITFALL, MemoryCategory.PROHIBITED,
+                 MemoryCategory.FAILURE_PATTERN],
+                limit=3,
+            )
+            for e in entries:
+                # 尝试加载 entry 正文以获得更多细节
+                body = store.load_entry(e.id)
+                if body and body.content and len(body.content) > len(e.title):
+                    detail = body.content  # 来自 entries/{id}.md 的详细内容
+                else:
+                    detail = e.content or e.title  # fallback 到索引摘要
+
+                if len(detail) > 120:
+                    detail = detail[:120] + "..."
+                tag = e.tags[0] if e.tags else "注意"
+                warnings.append(f"[{tag}] {detail}")
+
+            if warnings:
+                logger.info("Preflight: loaded %d warning(s) from memory", len(warnings))
+        except Exception as exc:
+            logger.debug("Preflight warnings unavailable: %s", exc)
+
+        return warnings[:2]
+
 
 # ── 内置阶段处理器 ──────────────────────────────────────────────
 
@@ -381,6 +421,15 @@ class ExecuteHandler(StageHandler):
         # ── Phase VALIDATE: AI 已提交当前 Task 结果 ──
         submitted = state.metadata.get("execute_result")
         if submitted and isinstance(submitted, dict):
+            # PlanLock 恢复路径: AI 提交 lock_plan 指令
+            if submitted.get("lock_plan"):
+                state.plan_lock_state = "locked"
+                state.needs_ai_input = False
+                state.metadata.pop("execute_result", None)
+                state.task_state.notes.append("[EXECUTE] PlanLock → locked (AI 确认)")
+                logger.info("Plan locked by AI confirmation")
+                # 重新进入 PREPARE 构造真正的编码 prompt
+                return self._prepare_task(state, contracts[current_idx], current_idx, len(contracts))
             return self._validate_task_result(state, submitted, contracts[current_idx])
 
         # ── Phase PREPARE: Task Start Gate + 构造 prompt ──
@@ -415,7 +464,7 @@ class ExecuteHandler(StageHandler):
             return state  # Guard blocked
 
         # 3. ContextRouter 注入 EXECUTE 上下文（仅当前 Task 需要的文件）
-        self._load_execute_context(state, contract)
+        execute_context = self._load_execute_context(state, contract)
 
         # 4. 检查 PlanLock 状态（架构 §8.6.4: AI 只能执行 approved plan）
         if state.plan_lock_state == "unlocked" and state.plan_contracts:
@@ -445,27 +494,52 @@ class ExecuteHandler(StageHandler):
         if state.plan_lock_state == "breached":
             return self._stop_failure(state, "PlanLock BREACHED — 需要人工介入")
 
-        # 5. 构造 AI prompt (增强: 可执行的 Implementation Checklist)
+        # 5. 构造 AI prompt — 精简指令 + 结构化字段
+        #    instruction 只含目标概述，约束数据在独立字段避免重复
         checklist = self._build_checklist(contract)
+        preflight = self._load_preflight_warnings(state)
+
+        # 大局上下文: 让 AI 知道自己在整个需求中的位置
+        big_picture_parts = [f"整体目标: {contract.get('goal', contract.get('title', ''))}"]
+        if state.task_intake:
+            big_picture_parts.append(f"需求背景: {state.task_intake.reason[:200]}")
+        # 前后 Task 关系
+        if idx > 0:
+            prev = state.plan_contracts[idx - 1]
+            big_picture_parts.append(f"前置 Task 已完成: {prev.get('task_id', '')} — {prev.get('title', '')}")
+        if idx + 1 < total:
+            nxt = state.plan_contracts[idx + 1]
+            big_picture_parts.append(f"后续 Task 依赖本 Task: {nxt.get('task_id', '')} — {nxt.get('title', '')}")
+
+        instruction_parts = [
+            f"Task {task_id} ({idx + 1}/{total}): {contract.get('goal', contract.get('title', ''))}",
+            "",
+            "## 大局上下文",
+            *big_picture_parts,
+        ]
+        if preflight:
+            instruction_parts.extend(["", "## 编码前注意 (来自项目记忆)", *preflight])
+        instruction_parts.extend([
+            "",
+            "## Implementation Checklist (逐项确认后编码)",
+            *[f"- [ ] {item}" for item in checklist],
+            "",
+            "提交格式见 submission_format 字段。",
+        ])
+
         state.pending_action = "execute_task"
         state.pending_prompt = {
-            "instruction": (
-                f"执行 Task {task_id} ({idx + 1}/{total}): {contract.get('title', '')}\n\n"
-                "## Implementation Checklist (每项编码前确认，完成时打勾):\n"
-                + "\n".join(f"- [ ] {item}" for item in checklist) +
-                "\n\n提交格式:\n"
-                "{\n"
-                '  "changed_files": ["path/to/file"],\n'
-                '  "lines_added": N,\n'
-                '  "lines_removed": N,\n'
-                '  "summary": "变更说明",\n'
-                '  "checklist_completed": ["已完成项1", "已完成项2"],\n'
-                '  "style_contract_followed": true,\n'
-                '  "reuse_check_passed": true,\n'
-                '  "new_abstractions": [],\n'
-                '  "new_dependencies": []\n'
-                "}"
-            ),
+            "instruction": "\n".join(instruction_parts),
+            # 结构化字段 — 与 instruction 互补不重复
+            "goal_context": {
+                "task_goal": contract.get("goal", contract.get("title", "")),
+                "overall_reason": state.task_intake.reason if state.task_intake else "",
+                "position": f"{idx + 1}/{total}",
+                "depends_on": [state.plan_contracts[idx - 1].get("task_id", "")] if idx > 0 else [],
+                "required_by": [state.plan_contracts[idx + 1].get("task_id", "")] if idx + 1 < total else [],
+            },
+            "context": execute_context,
+            "preflight_warnings": preflight,
             "task_contract": contract,
             "style_contract": contract.get("style_contract", {}),
             "reuse_check": contract.get("reuse_check", {}),
@@ -475,6 +549,16 @@ class ExecuteHandler(StageHandler):
                 "max_lines": contract.get("budget", {}).get("max_lines", 100),
                 "allow_new_abstractions": contract.get("budget", {}).get("allow_new_abstractions", False),
                 "allow_new_dependencies": contract.get("budget", {}).get("allow_new_dependencies", False),
+            },
+            "submission_format": {
+                "changed_files": ["path/to/file"],
+                "lines_added": 0,
+                "lines_removed": 0,
+                "summary": "变更说明",
+                "style_contract_followed": True,
+                "reuse_check_passed": True,
+                "new_abstractions": [],
+                "new_dependencies": [],
             },
             "worktree": {
                 "enabled": state.use_worktree,
@@ -559,6 +643,14 @@ class ExecuteHandler(StageHandler):
         # 3.5. 增量验证 — Per-task 快速检查 (typecheck/compile/lint)
         quick_check = self._run_quick_check(state, changed_files)
 
+        # 3.6. Python 侧验证 style_contract / reuse_check（P1 fix: 不完全信任 AI 自报）
+        style_verified, style_issues = self._verify_style_contract(
+            state, contract, changed_files
+        )
+        reuse_verified, reuse_issues = self._verify_reuse_check(
+            state, contract, changed_files
+        )
+
         log = TaskExecutionLog(
             task_id=task_id,
             status="implemented",
@@ -569,8 +661,12 @@ class ExecuteHandler(StageHandler):
                 "allowed_files_only": self._check_allowed_only(contract, changed_files),
                 "diff_budget_exceeded": not budget_ok,
                 "diff_budget_detail": budget_msg,
-                "style_contract_followed": submitted.get("style_contract_followed", True),
-                "reuse_check_passed": submitted.get("reuse_check_passed", True),
+                "style_contract_followed": style_verified,
+                "style_contract_ai_reported": submitted.get("style_contract_followed", True),
+                "style_contract_issues": style_issues,
+                "reuse_check_passed": reuse_verified,
+                "reuse_check_ai_reported": submitted.get("reuse_check_passed", True),
+                "reuse_check_issues": reuse_issues,
             },
             verification={"quick_check": quick_check},
         )
@@ -606,13 +702,31 @@ class ExecuteHandler(StageHandler):
     def _handle_plan_change(
         self, state: RunState, plan_change: dict, contract: dict,
     ) -> RunState:
-        """处理 Plan Change Request。"""
+        """处理 Plan Change Request。
+
+        强制执行 MAX_PLAN_CHANGE_REQUESTS 上限（默认 3）。
+        """
         task_id = contract.get("task_id", "?")
         risk = state.task_intake.risk_level if state.task_intake else "L2"
 
+        # Plan Change 计数器检查（P1 fix: 强制执行上限）
+        plan_change_count = state.metadata.get("plan_change_count", 0) + 1
+        state.metadata["plan_change_count"] = plan_change_count
+        if plan_change_count > self.MAX_PLAN_CHANGE_REQUESTS:
+            state.plan_lock_state = "breached"
+            state.task_state.notes.append(
+                f"[EXECUTE] Plan Change 次数超限: {plan_change_count} > "
+                f"{self.MAX_PLAN_CHANGE_REQUESTS} → PlanLock BREACHED"
+            )
+            logger.warning("Plan change limit exceeded: %d", plan_change_count)
+            return self._stop_failure(
+                state,
+                f"Plan Change 次数超过上限 ({self.MAX_PLAN_CHANGE_REQUESTS})，需人工介入",
+            )
+
         state.plan_lock_state = "change_requested"
         state.task_state.notes.append(
-            f"[EXECUTE] Plan Change Request from Task {task_id}: "
+            f"[EXECUTE] Plan Change Request #{plan_change_count} from Task {task_id}: "
             f"reason={plan_change.get('reason', '')[:80]}"
         )
 
@@ -706,6 +820,11 @@ class ExecuteHandler(StageHandler):
         # 不破坏已有行为
         checklist.append("保持已有测试通过，不删除/削弱已有断言")
         checklist.append("不进行无关格式化和重构")
+
+        # Karpathy 行为准则（短标签唤醒，原文在 .claude/rules/karpathy.md）
+        checklist.append("极简: 无未要求的抽象/配置/异常处理？")
+        checklist.append("纯粹: 每行改动都能追溯到需求？不动相邻代码")
+        checklist.append("确定: 不确定的地方是否已标出而非猜测？")
 
         return checklist
 
@@ -830,19 +949,24 @@ class ExecuteHandler(StageHandler):
             )
             return True
         except Exception as exc:
-            logger.warning("Guard check failed (non-blocking): %s", exc)
-            return True
+            # P2 fix: Guard 异常时阻止执行 (fail-safe)，不静默跳过
+            logger.error("Guard check raised exception, BLOCKING: %s", exc)
+            state.task_state.notes.append(
+                f"[EXECUTE] Guard 异常，阻止执行: {type(exc).__name__}: {exc}"
+            )
+            return False
 
-    def _load_execute_context(self, state: RunState, contract: dict) -> None:
+    def _load_execute_context(self, state: RunState, contract: dict) -> str:
         """ContextRouter 注入当前 Task 需要的上下文。
 
         上下文预算感知: 加载前检查预算，加载后跟踪使用量。
+        返回渲染后的上下文文本，可直接注入 AI prompt。
         """
         try:
             from engines.context.router import ContextRouter
-            router = ContextRouter(state.project_root)
+            router = self._get_context_router(state)
             bundle = router.route(stage=StageType.EXECUTE, run_state=state)
-            if bundle:
+            if bundle and bundle.pieces:
                 # 上下文预算检查
                 if not self._check_context_budget(state, bundle.total_tokens):
                     state.task_state.notes.append(
@@ -859,8 +983,21 @@ class ExecuteHandler(StageHandler):
                     state.task_state.notes.append(
                         f"[EXECUTE context] Context 已截断 (trimmed={bundle.trimmed})"
                     )
+                return bundle.render()
+            return ""
         except Exception as exc:
             logger.warning("ContextRouter failed for EXECUTE: %s", exc)
+            return ""
+
+    # ContextRouter 实例缓存（per-handler 复用，避免重复初始化）
+    _cached_router = None
+
+    def _get_context_router(self, state: RunState):
+        """获取复用的 ContextRouter 实例（P3 优化：避免 per-task 重复初始化）。"""
+        if self._cached_router is None:
+            from engines.context.router import ContextRouter
+            self._cached_router = ContextRouter(state.project_root)
+        return self._cached_router
 
     def _count_actual_diff(
         self, state: RunState, changed_files: list[str],
@@ -955,6 +1092,123 @@ class ExecuteHandler(StageHandler):
             if not any(fnmatch.fnmatch(f, pattern) for pattern in allowed):
                 return False
         return True
+
+    def _verify_style_contract(
+        self, state: RunState, contract: dict, changed_files: list[str],
+    ) -> tuple[bool, list[str]]:
+        """Python 侧验证 Style Contract — 不完全信任 AI 自报。
+
+        检查项:
+        - 命名规范一致性（snake_case vs camelCase）
+        - 不允许新类/抽象时是否引入了新类定义
+        """
+        import re
+        from pathlib import Path
+
+        issues: list[str] = []
+        style = contract.get("style_contract", {})
+        if not style or not changed_files:
+            return True, []
+
+        project_root = Path(state.project_root) if state.project_root else Path.cwd()
+
+        for fpath in changed_files:
+            full_path = project_root / fpath
+            if not full_path.exists():
+                continue
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            # 1. 命名规范检查
+            naming = style.get("naming", "")
+            if naming and "snake_case" in naming:
+                camel_funcs = re.findall(r'^\s*def\s+([a-z]+[A-Z][a-zA-Z]*)', content, re.MULTILINE)
+                if camel_funcs:
+                    issues.append(
+                        f"{fpath}: camelCase 函数定义 {camel_funcs} 违反 snake_case 规范"
+                    )
+
+            # 2. 新类/抽象检查
+            budget = contract.get("budget", {})
+            if not budget.get("allow_new_abstractions", False):
+                new_classes = re.findall(r'^\s*class\s+(\w+)', content, re.MULTILINE)
+                if new_classes:
+                    issues.append(
+                        f"{fpath}: 不允许新抽象但检测到新类: {new_classes}"
+                    )
+
+            # 3. 错误处理一致性
+            error_handling = style.get("error_handling", "")
+            if error_handling == "raise" or "raise" in str(error_handling):
+                if "except:" in content:
+                    issues.append(f"{fpath}: 不允许 bare except (应使用具体异常类型)")
+
+        return len(issues) == 0, issues
+
+    def _verify_reuse_check(
+        self, state: RunState, contract: dict, changed_files: list[str],
+    ) -> tuple[bool, list[str]]:
+        """Python 侧验证 Reuse Check — 检查是否引入了项目已有的依赖之外的导入。
+
+        检查项:
+        - 新依赖检测：扫描新增 import，与项目已有依赖对比
+        """
+        import re
+        from pathlib import Path
+
+        issues: list[str] = []
+        if not changed_files:
+            return True, []
+
+        budget = contract.get("budget", {})
+        allow_new_deps = budget.get("allow_new_dependencies", False)
+        if allow_new_deps:
+            return True, []
+
+        project_root = Path(state.project_root) if state.project_root else Path.cwd()
+
+        # 收集项目中已有的顶层包依赖（仅扫描项目根目录下 py 文件，不做递归）
+        existing_deps: set[str] = set()
+        try:
+            for f in project_root.rglob("*.py"):
+                if ".git" in f.parts or "__pycache__" in f.parts:
+                    continue
+                try:
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        m = re.match(r'^(?:from|import)\s+(\w+)', line.strip())
+                        if m:
+                            existing_deps.add(m.group(1))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 检查变更文件的新导入
+        for fpath in changed_files:
+            full_path = project_root / fpath
+            if not full_path.exists():
+                continue
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            new_imports: list[str] = []
+            for line in content.splitlines():
+                m = re.match(r'^(?:from|import)\s+(\w+)', line.strip())
+                if m:
+                    dep = m.group(1)
+                    if dep not in existing_deps and dep not in ("__future__",):
+                        new_imports.append(dep)
+
+            if new_imports:
+                issues.append(
+                    f"{fpath}: 疑似新依赖 {new_imports} (不在项目已有依赖中)"
+                )
+
+        return len(issues) == 0, issues
 
     def _run_quick_check(
         self, state: RunState, changed_files: list[str],
@@ -1198,15 +1452,22 @@ class VerifyHandler(StageHandler):
 
 
 class RepairHandler(StageHandler):
-    """修复处理器 —— 分析 FailureRecord，注入失败上下文。
+    """修复处理器 —— 两阶段协议: PREPARE (构造修复 prompt) → VALIDATE (AI 提交修复)。
 
-    Python 职责（架构定义）:
-        ContextRouter 注入失败上下文
+    Python 职责:
+      1. Gate 检查: 重试次数、环境故障
+      2. ContextRouter 注入失败上下文
+      3. 构造 pending_prompt 给 AI 修复
+      4. 校验 AI 修复结果（至少验证不再触发同一 failure）
+
     AI 职责:
-        分析根因、最小修复
+      1. 分析根因
+      2. 最小修复（不删断言、不改 scenario）
+      3. 提交 changed_files + summary
     """
 
     stage = StageType.REPAIR
+    MAX_REPAIR_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
         logger.info("Repair — analyzing failures and loading context")
@@ -1215,18 +1476,16 @@ class RepairHandler(StageHandler):
         state.task_state.stage = StageType.REPAIR
 
         # 1. 检查重试次数
-        max_retries = 3
-        if state.task_state.retry_count >= max_retries:
-            logger.error("Repair retry limit (%d) exceeded", max_retries)
+        if state.task_state.retry_count >= self.MAX_REPAIR_RETRIES:
+            logger.error("Repair retry limit (%d) exceeded", self.MAX_REPAIR_RETRIES)
             state.task_state.notes.append(
-                f"[REPAIR] 超过最大重试次数 {max_retries}, 升级给用户"
+                f"[REPAIR] 超过最大重试次数 {self.MAX_REPAIR_RETRIES}, 升级给用户"
             )
-            return self._stop_failure(state, f"修复失败: 超过 {max_retries} 次重试")
+            return self._stop_failure(state, f"修复失败: 超过 {self.MAX_REPAIR_RETRIES} 次重试")
 
         state.task_state.retry_count += 1
 
         # 2. 分析最近的 FailureRecord
-        #    环境故障不可通过代码修复，直接终止
         if state.failures:
             latest = state.failures[-1]
             if latest.category.value == "environment":
@@ -1242,21 +1501,29 @@ class RepairHandler(StageHandler):
                     f"环境故障不可自动修复: {latest.message[:200]}",
                 )
             logger.info("Latest failure [%s]: %s", latest.category.value, latest.message[:120])
-            state.task_state.notes.append(
-                f"[REPAIR] attempt={state.task_state.retry_count}/{max_retries}, "
-                f"category={latest.category.value}, message={latest.message[:100]}"
-            )
         else:
             state.task_state.notes.append(
-                f"[REPAIR] attempt={state.task_state.retry_count}/{max_retries}, 无 failure 记录"
+                f"[REPAIR] attempt={state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}, 无 failure 记录"
             )
 
-        # 3. 通过 ContextRouter 加载失败相关上下文
+        # ── Phase VALIDATE: AI 已提交修复结果 ──
+        submitted = state.metadata.get("repair_result")
+        if submitted and isinstance(submitted, dict):
+            return self._validate_repair_result(state, submitted)
+
+        # ── Phase PREPARE: 构造修复 prompt ──
+        return self._prepare_repair(state)
+
+    def _prepare_repair(self, state: RunState) -> RunState:
+        """构造修复 prompt，注入失败上下文 + preflight warnings。"""
+        # 1. 通过 ContextRouter 加载失败相关上下文
+        repair_context = ""
         try:
             from engines.context.router import ContextRouter
             router = ContextRouter(state.project_root)
             bundle = router.route(stage=StageType.REPAIR, run_state=state)
-            if bundle:
+            if bundle and bundle.pieces:
+                repair_context = bundle.render()
                 state.task_state.notes.append(
                     f"[REPAIR context] tokens={bundle.total_tokens}, "
                     f"files={len(bundle.pieces)}"
@@ -1265,13 +1532,104 @@ class RepairHandler(StageHandler):
             logger.warning("ContextRouter failed for REPAIR: %s", exc)
             state.task_state.notes.append(f"[REPAIR] ContextRouter 不可用: {exc}")
 
-        # 4. 设置状态，AI 分析根因并修复
+        # 2. 构建失败摘要
+        failure_text = "**Recent Failures:**\n"
+        if state.failures:
+            for f in state.failures[-3:]:
+                failure_text += f"- [{f.category.value}] {f.message[:150]}\n"
+        else:
+            failure_text += "(无详细 failure 记录)\n"
+
+        # 3. Preflight warnings — 修复时更需要历史教训
+        preflight = self._load_preflight_warnings(state)
+
+        # 4. 变更文件列表
+        changed_files: list[str] = []
+        for cp in state.checkpoints:
+            changed_files.extend(cp.files_changed)
+        changed_files = list(dict.fromkeys(changed_files))
+
+        instruction_parts = [
+            f"修复尝试 {state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}",
+            "",
+            failure_text,
+        ]
+        if changed_files:
+            instruction_parts.append(f"**变更过的文件:** {changed_files}")
+        if preflight:
+            instruction_parts.extend(["", "## 历史教训 (避免重犯)", *preflight])
+        instruction_parts.extend([
+            "",
+            "## 约束",
+            "- 分析根因，最小修复（≤ 30 行变更）",
+            "- 不修改 scenario 定义文件",
+            "- 不删除或削弱已有测试断言",
+            "- 修复后运行对应测试确认通过",
+            "",
+            "提交格式: {\"changed_files\": [...], \"summary\": \"...\", \"root_cause\": \"...\"}",
+        ])
+
+        state.pending_action = "repair"
+        state.pending_prompt = {
+            "instruction": "\n".join(instruction_parts),
+            "context": repair_context,
+            "preflight_warnings": preflight,
+            "failures": [
+                {"category": f.category.value, "message": f.message, "stage": f.stage.value}
+                for f in (state.failures or [])[-5:]
+            ],
+            "changed_files": changed_files,
+            "repair_constraints": {
+                "max_files": 3,
+                "max_lines": 50,
+                "no_scenario_modification": True,
+                "no_assertion_deletion": True,
+            },
+        }
+        state.needs_ai_input = True
         state.task_state.notes.append(
-            "[REPAIR] AI 需: 分析根因 → 最小修复 → 不修改 scenario 定义 → 不删除断言"
+            f"[REPAIR] PREPARE: attempt={state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}"
+        )
+        logger.info("Repair prompt ready, waiting for AI fix")
+        return state
+
+    def _validate_repair_result(
+        self, state: RunState, submitted: dict,
+    ) -> RunState:
+        """校验 AI 修复结果。"""
+        changed_files = submitted.get("changed_files", [])
+        summary = submitted.get("summary", "")
+        root_cause = submitted.get("root_cause", "")
+
+        # 1. 文件数检查
+        if len(changed_files) > 5:
+            state.task_state.notes.append(
+                f"[REPAIR] 修复涉及 {len(changed_files)} 个文件, 可能是过度修复"
+            )
+
+        # 2. 检查是否改了 scenario 文件
+        scenario_files = [f for f in changed_files if "scenario" in f or ".ai/" in f]
+        if scenario_files:
+            state.task_state.notes.append(
+                f"[REPAIR] 警告: 修复修改了 scenario 相关文件: {scenario_files}"
+            )
+
+        # 3. 记录修复日志
+        state.task_state.notes.append(
+            f"[REPAIR] 修复完成: files={changed_files}, "
+            f"root_cause={root_cause[:100]}, summary={summary[:100]}"
         )
 
-        logger.info("Repair ready — AI should analyze root cause and apply minimal fix")
-        return self._advance_to(state, StageType.VERIFY, f"修复 attempt {state.task_state.retry_count}, 重新验证")
+        # 4. 清理并进入 VERIFY
+        state.needs_ai_input = False
+        state.pending_action = ""
+        state.metadata.pop("repair_result", None)
+
+        logger.info("Repair validated, re-entering VERIFY")
+        return self._advance_to(
+            state, StageType.VERIFY,
+            f"修复 applied (attempt {state.task_state.retry_count}), 重新验证",
+        )
 
 
 class ReviewHandler(StageHandler):
@@ -1787,28 +2145,46 @@ class DirectExecuteHandler(StageHandler):
         state.task_state.status = state.task_state.status.__class__.IN_PROGRESS
         state.task_state.stage = StageType.DIRECT_EXECUTE
 
-        # 3. 构造 AI prompt
+        # 2.5. ContextRouter 注入 DIRECT_EXECUTE 上下文（至少做 codegraph 定位 + 相关文件）
+        direct_context = self._load_direct_context(state)
+
+        # 3. 构造 AI prompt — 精简指令 + 结构化字段（与 EXECUTE 对齐）
         user_input = state.metadata.get("user_input", "")
+        checklist = [
+            "只修改需求相关的文件 ≤ 3",
+            "遵守项目已有代码风格和命名规范",
+            "不引入新依赖或新抽象层",
+            "保持已有测试通过，不删除/削弱已有断言",
+            "不进行无关格式化和重构",
+            "极简: 无未要求的抽象/配置/异常处理？",
+            "纯粹: 每行改动都能追溯到需求？不动相邻代码",
+            "确定: 不确定的地方是否已标出而非猜测？",
+        ]
+        preflight = self._load_preflight_warnings(state)
+        instruction_parts = [
+            f"Direct Mode — 需求: {user_input}",
+            f"风险等级: {intake.risk_level if intake else 'L1'}",
+        ]
+        if preflight:
+            instruction_parts.extend(["", "## 编码前注意", *preflight])
+        instruction_parts.extend([
+            "",
+            "## Implementation Checklist (逐项确认后编码)",
+            *[f"- [ ] {item}" for item in checklist],
+        ])
         state.pending_action = "direct_execute"
         state.pending_prompt = {
-            "instruction": (
-                "Direct Mode 快速执行:\n"
-                f"需求: {user_input}\n\n"
-                "约束:\n"
-                "- 修改文件数 ≤ 3\n"
-                "- 遵守项目已有代码风格\n"
-                "- 不引入新的依赖或抽象\n"
-                "- 保持已有行为不变\n\n"
-                "提交格式:\n"
-                "{\n"
-                '  "changed_files": ["path/to/file"],\n'
-                '  "lines_added": N,\n'
-                '  "lines_removed": N,\n'
-                '  "summary": "变更说明",\n'
-                '  "style_contract_followed": true\n'
-                "}"
-            ),
+            "instruction": "\n".join(instruction_parts),
+            "context": direct_context,
+            "preflight_warnings": preflight,
+            "implementation_checklist": checklist,
             "risk_level": intake.risk_level if intake else "L1",
+            "budget": {
+                "max_files": 3,
+                "max_lines": 100,
+                "allow_new_abstractions": False,
+                "allow_new_dependencies": False,
+            },
         }
         state.needs_ai_input = True
         state.task_state.notes.append(
@@ -1816,6 +2192,31 @@ class DirectExecuteHandler(StageHandler):
         )
         logger.info("Direct Execute prompt ready")
         return state
+
+    def _load_direct_context(self, state: RunState) -> str:
+        """Direct Mode 上下文 — 浅层上下文注入（至少 codegraph 定位）。
+
+        比 EXECUTE 策略更轻量，仅加载项目地图 + codegraph 相关上下文。
+        复用 ContextRouter 实例避免重复初始化。
+        """
+        try:
+            from engines.context.router import ContextRouter
+            # 复用缓存实例
+            if not hasattr(self, '_cached_router') or self._cached_router is None:
+                self._cached_router = ContextRouter(state.project_root)
+            router = self._cached_router
+            # 使用 DIRECT_EXECUTE 的轻量策略
+            bundle = router.route(stage=StageType.DIRECT_EXECUTE, run_state=state)
+            if bundle and bundle.pieces:
+                state.task_state.notes.append(
+                    f"[DIRECT context] tokens={bundle.total_tokens}, "
+                    f"files={len(bundle.pieces)}"
+                )
+                return bundle.render()
+            return ""
+        except Exception as exc:
+            logger.warning("ContextRouter failed for DIRECT_EXECUTE: %s", exc)
+            return ""
 
     def _validate_direct_result(
         self, state: RunState, submitted: dict, intake,

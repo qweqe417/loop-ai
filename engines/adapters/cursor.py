@@ -8,12 +8,15 @@ Cursor 没有插件变量机制，路径写绝对路径。
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from engines.adapters.base import McpServerDef, ToolAdapter
 from engines.init.models import ProjectProfile
+
+logger = logging.getLogger(__name__)
 
 
 class CursorAdapter(ToolAdapter):
@@ -140,7 +143,7 @@ class CursorAdapter(ToolAdapter):
         plugin_root: Path,
         providers: list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Cursor 安装：MCP 配置 / loop-config.json。"""
+        """Cursor 安装：MCP 配置 / loop-config.json / karpathy.md 规则。"""
         created: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
@@ -174,19 +177,25 @@ class CursorAdapter(ToolAdapter):
         )
         created.append(str(loop_config_dst.relative_to(root)))
 
+        # 3. Karpathy 行为准则 — 从插件源码原封不动拷贝，不让 AI 发挥
+        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "SKILL.md"
+        karpathy_dst = root / self.rules_dir / "karpathy.md"
+        if karpathy_src.exists():
+            karpathy_dst.parent.mkdir(parents=True, exist_ok=True)
+            if not karpathy_dst.exists():
+                karpathy_dst.write_text(
+                    karpathy_src.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                created.append(str(karpathy_dst.relative_to(root)))
+            else:
+                skipped.append(str(karpathy_dst.relative_to(root)))
+                logger.info("karpathy.md already exists, skipping")
+        else:
+            logger.warning("karpathy SKILL.md not found at %s, skipping", karpathy_src)
+
         return {
             "success": len(errors) == 0,
             "files_created": created,
             "files_skipped": skipped,
             "errors": errors,
         }
-
-    def _get_aicode_rules(self) -> list[str]:
-        return [
-            "@aicode-full — 完整开发流程",
-            "@aicode-dev — 开发模式",
-            "@aicode-spec — 生成 Spec",
-            "@aicode-direct — 快速通道",
-            "@aicode-review — 代码审查",
-            "@aicode-memory — 记忆沉淀",
-        ]

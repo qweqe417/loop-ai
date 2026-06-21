@@ -71,8 +71,12 @@ class ContextBundle(BaseModel):
     trimmed: bool = Field(default=False, description="是否因超预算做过裁剪")
 
     def render(self) -> str:
-        """把上下文包渲染为一段可注入 AI 会话的文本。"""
+        """把上下文包渲染为一段可注入 AI 会话的文本。
+
+        使用简短前缀格式替代 HTML 注释，节省 ~30 chars/piece。
+        """
         parts: list[str] = []
         for piece in self.pieces:
-            parts.append(f"<!-- source={piece.source} path={piece.path} -->\n{piece.content}")
+            label = f"{piece.source}:{piece.path}" if piece.path else piece.source
+            parts.append(f"### [{label}]\n{piece.content}")
         return "\n\n".join(parts)

@@ -113,10 +113,13 @@ def main() -> int:
     # ── loop ─────────────────────────────────────
     p_loop = sub.add_parser("loop", help="运行 Loop")
     p_loop.add_argument("mode", nargs="?", default="full",
-                        choices=["full", "dev", "test", "spec", "plan", "plan-only", "verify", "review", "memory", "direct", "continue"])
+                        choices=["full", "dev", "test", "spec", "plan", "plan-only",
+                                 "verify", "review", "memory", "direct", "continue"])
     p_loop.add_argument("--task", default="")
     p_loop.add_argument("--state-file", default="")
     p_loop.add_argument("--result", default="", help="AI 提交的结果 JSON (仅 continue 模式)")
+    p_loop.add_argument("--only", action="store_true", default=False,
+                        help="仅生成代码，不验证/审查（仅 dev/direct 模式有效）")
     p_loop.add_argument("--target", default="", help="目标 AI 工具 (claude_code/codex/cursor)，默认自动检测")
     p_loop.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
 
@@ -274,6 +277,15 @@ def _cmd_loop(args: argparse.Namespace) -> dict:
     from engines.state.models import RunState, TaskIntakeResult
 
     mode = args.mode
+
+    # --only 参数：dev → dev-only, direct → direct-only
+    if getattr(args, "only", False):
+        if mode == "dev":
+            mode = "dev-only"
+        elif mode == "direct":
+            mode = "direct-only"
+        else:
+            logger.warning("--only 仅对 dev/direct 模式有效，忽略")
 
     # ── continue 模式: 恢复暂停的 loop，注入 AI 结果 ──
     if mode == "continue":

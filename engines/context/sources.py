@@ -71,6 +71,92 @@ class FileSource:
             metadata={"mode": "full", "lines": lines},
         )
 
+    def read_smart(
+        self, rel_path: str | Path, max_header: int = 60, max_full: int = 300,
+        max_outline: int = 50,
+    ) -> ContextPiece:
+        """智能读取：小文件全文，大文件头 + 符号大纲。
+
+        策略:
+        - ≤ max_full 行: 读全文（AI 需要完整上下文的小文件）
+        - > max_full 行: 读前 max_header 行 (imports + 顶层定义)
+          + 提取类/函数签名作为大纲，帮助 AI 理解文件结构
+        这样既保留了必要的结构信息，又避免大文件 token 爆炸。
+        """
+        import re
+        fp = self._root / rel_path
+        content = ""
+        total_lines = 0
+        mode = "full"
+
+        if not fp.exists():
+            return ContextPiece(
+                source="file", path=str(rel_path),
+                content=f"[file not found: {rel_path}]",
+                token_estimate=5, priority=2,
+                metadata={"mode": "error", "lines": 0},
+            )
+
+        try:
+            text = fp.read_text(encoding="utf-8")
+            total_lines = text.count("\n") + 1
+        except Exception as e:
+            return ContextPiece(
+                source="file", path=str(rel_path),
+                content=f"[read error: {e}]",
+                token_estimate=5, priority=2,
+                metadata={"mode": "error", "lines": 0},
+            )
+
+        if total_lines <= max_full:
+            content = text
+            mode = "full"
+        else:
+            # 大文件: 头 + 符号大纲（上限 max_outline 条）
+            header_lines = text.splitlines()[:max_header]
+            header = "\n".join(header_lines)
+
+            # 提取顶层类/函数签名作为快速导航
+            all_outline: list[str] = []
+            for line in text.splitlines():
+                stripped = line.strip()
+                if re.match(r'^\s*(def |class |async def )', stripped):
+                    all_outline.append(stripped[:100])
+
+            outline_text = ""
+            if all_outline:
+                if len(all_outline) > max_outline:
+                    # 超限时均匀采样: 前 20 + 中 10 + 后 20
+                    sampled = (
+                        all_outline[:20]
+                        + [f"... ({len(all_outline) - 40} 个符号省略) ..."]
+                        + all_outline[-20:]
+                    )
+                    outline = sampled
+                else:
+                    outline = all_outline
+                outline_text = (
+                    f"\n\n# ── 文件符号大纲 (共 {len(all_outline)} 个顶层定义"
+                    f"{'，显示 ' + str(len(outline)) + ' 个' if len(all_outline) > max_outline else ''}) ──\n"
+                    + "\n".join(outline)
+                )
+
+            content = (
+                f"[smart read: 显示前 {max_header}/{total_lines} 行 + 符号大纲]\n\n"
+                f"{header}"
+                f"{outline_text}"
+            )
+            mode = "smart"
+
+        return ContextPiece(
+            source="file",
+            path=str(rel_path),
+            content=content,
+            token_estimate=_estimate(content),
+            priority=2,
+            metadata={"mode": mode, "lines": min(total_lines, max_header), "total_lines": total_lines},
+        )
+
     def read_summary(self, rel_path: str | Path, max_lines: int = 80) -> ContextPiece:
         """读取文件摘要：前 max_lines 行，不包含完整实现。"""
         fp = self._root / rel_path

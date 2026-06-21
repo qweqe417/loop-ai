@@ -13,6 +13,7 @@ Execute code changes, verify, and review. Assumes Spec and Plan already exist.
 ```
 /aicode-dev <开发任务>
 /aicode-dev --task "实现 UserService.getById"
+/aicode-dev --only --task "小改动"          (仅生成代码，不验证/审查)
 ```
 
 ## Execution
@@ -20,15 +21,25 @@ Execute code changes, verify, and review. Assumes Spec and Plan already exist.
 ### Step 1: Start dev loop
 
 ```bash
+# 完整模式 (生成+验证+修复+审查)
 {engines_cmd} loop dev --task "<任务>" --format json
+
+# 仅生成代码
+{engines_cmd} loop dev --only --task "<任务>" --format json
 ```
 
 ### Step 2: The dev loop
 
+完整模式:
 ```
-EXECUTE → VERIFY → REVIEW → COMPLETED
+EXECUTE → VERIFY → REVIEW → MEMORY → COMPLETED
                 ↓ (失败)
              REPAIR → VERIFY
+```
+
+--only 模式:
+```
+EXECUTE → COMPLETED
 ```
 
 ### Step 3: Read results

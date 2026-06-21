@@ -17,11 +17,12 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
+import logging
 from typing import TYPE_CHECKING
 
 from engines.state.enums import StageType
+
+logger = logging.getLogger(__name__)
 
 from .models import ContextPiece
 
@@ -175,26 +176,32 @@ def execute_strategy(router: "ContextRouter", run_state: "RunState") -> list[Con
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 风格合约 (priority=1)
-    style = router.file.read_summary(".claude/rules/code-style.md", max_lines=50)
-    style.priority = 1
-    style.metadata["stage_relevance"] = "must follow when writing code"
-    pieces.append(style)
-
-    # 2. 安全规则 (priority=1)
-    safety = router.file.read_summary(".claude/rules/safety.md", max_lines=30)
-    if safety.content.strip():
-        safety.priority = 1
-        pieces.append(safety)
-
-    # 3. 修改文件 (priority=1) — 从 run_state 中提取 allowed files
+    # 1. 修改文件 (priority=1) — 从 run_state 中提取 allowed files
+    # 注：code-style.md / safety.md / karpathy.md 由 Claude Code 原生加载，
+    # ContextRouter 不再重复读取，避免浪费 I/O 和 token 预算
+    # 优化: 使用 read_smart() — 小文件全文，大文件头+符号大纲
+    MAX_FULL_FILES = 3
+    key_symbols = _extract_key_symbols(run_state)
     allowed_files = _extract_allowed_files(run_state)
     if allowed_files:
-        for f in allowed_files:
-            cf = router.file.read_full(f)
-            cf.priority = 1
-            cf.metadata["stage_relevance"] = "file to modify"
-            pieces.append(cf)
+        for i, f in enumerate(allowed_files):
+            if i < MAX_FULL_FILES:
+                # 智能读取: 小文件全文，大文件仅头+大纲 (节省 token)
+                cf = router.file.read_smart(f, max_header=60, max_full=300)
+                cf.priority = 1
+                cf.metadata["stage_relevance"] = "file to modify"
+                pieces.append(cf)
+            else:
+                # 超出上限的文件仅列出路径，不加载内容
+                summary = router.file.read_summary(f, max_lines=10)
+                summary.priority = 2
+                summary.metadata["stage_relevance"] = "additional allowed file (summary only)"
+                pieces.append(summary)
+        if len(allowed_files) > MAX_FULL_FILES:
+            logger.info(
+                "execute_strategy: %d allowed files, loading smart for %d, summary for rest",
+                len(allowed_files), MAX_FULL_FILES,
+            )
     else:
         # 无明确 files 时用 codegraph 定位
         task_desc = run_state.task_id
@@ -203,20 +210,20 @@ def execute_strategy(router: "ContextRouter", run_state: "RunState") -> list[Con
             cg.priority = 1
             pieces.append(cg)
 
-    # 4. 调用链分析 — 对关键符号做 impact 分析 (priority=2)
+    # 2. 调用链分析 — 对关键符号做 impact 分析 (priority=2)
     key_symbols = _extract_key_symbols(run_state)
     for sym in key_symbols[:3]:
         imp = router.codegraph.get_impact(sym, depth=1)
         if imp.content and "unavailable" not in imp.content:
             pieces.append(imp)
 
-    # 5. 相关 Memory（少一点）(priority=3)
+    # 3. 相关 Memory（少一点）(priority=3)
     keywords = _extract_keywords(run_state)
     mem = router.memory.load_relevant(keywords, limit=3)
     mem.priority = 3
     pieces.append(mem)
 
-    # 6. 禁止文件列表 (priority=2)
+    # 4. 禁止文件列表 (priority=2)
     forbidden = _extract_forbidden_files(run_state)
     if forbidden:
         pieces.append(ContextPiece(

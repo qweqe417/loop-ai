@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from engines.adapters.base import McpServerDef, ToolAdapter
 from engines.init.models import ProjectProfile
+
+logger = logging.getLogger(__name__)
 
 
 class CodexAdapter(ToolAdapter):
@@ -134,7 +137,7 @@ class CodexAdapter(ToolAdapter):
         plugin_root: Path,
         providers: list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Codex 安装：MCP 配置 / loop-config.json。"""
+        """Codex 安装：MCP 配置 / loop-config.json / karpathy.md 规则。"""
         created: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
@@ -166,25 +169,25 @@ class CodexAdapter(ToolAdapter):
         )
         created.append(str(loop_config_dst.relative_to(root)))
 
+        # 3. Karpathy 行为准则 — 从插件源码原封不动拷贝，不让 AI 发挥
+        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "SKILL.md"
+        karpathy_dst = root / self.rules_dir / "karpathy.md"
+        if karpathy_src.exists():
+            karpathy_dst.parent.mkdir(parents=True, exist_ok=True)
+            if not karpathy_dst.exists():
+                karpathy_dst.write_text(
+                    karpathy_src.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                created.append(str(karpathy_dst.relative_to(root)))
+            else:
+                skipped.append(str(karpathy_dst.relative_to(root)))
+                logger.info("karpathy.md already exists, skipping")
+        else:
+            logger.warning("karpathy SKILL.md not found at %s, skipping", karpathy_src)
+
         return {
             "success": len(errors) == 0,
             "files_created": created,
             "files_skipped": skipped,
             "errors": errors,
         }
-
-    def _get_aicode_commands(self) -> list[str]:
-        cp = self.command_prefix
-        return [
-            f"{cp}aicode-init — project init",
-            f"{cp}aicode-calibrate — calibrate rules",
-            f"{cp}aicode-spec — generate spec",
-            f"{cp}aicode-plan — generate plan",
-            f"{cp}aicode-full — full 8-stage loop",
-            f"{cp}aicode-dev — dev mode",
-            f"{cp}aicode-test — test mode",
-            f"{cp}aicode-direct — quick path",
-            f"{cp}aicode-verify — scenario verification",
-            f"{cp}aicode-review — code review",
-            f"{cp}aicode-memory — persist learnings",
-        ]
