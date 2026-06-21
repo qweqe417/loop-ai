@@ -12,6 +12,7 @@ class StageType(str, Enum):
 
     INTAKE = "intake"                # 任务入口：分析复杂度 / 风险 / 分流模式
     SPEC = "spec"                    # 规格生成：由 Provider 产出 spec 文档
+    TEST_DESIGN = "test_design"      # 测试设计：生成测试用例与 Scenario 草案
     PLAN = "plan"                    # 计划生成：由 Provider 产出实施计划
     EXECUTE = "execute"              # 执行：实际写代码
     VERIFY = "verify"                # 验证：跑测试 / 场景回放

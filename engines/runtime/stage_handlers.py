@@ -22,22 +22,24 @@ logger = logging.getLogger(__name__)
 # 每个阶段完成后默认进入的下一个阶段（handler 可通过 decision 覆盖）
 DEFAULT_FLOW: dict[StageType, StageType | None] = {
     StageType.INTAKE:         StageType.SPEC,
-    StageType.SPEC:           StageType.PLAN,
+    StageType.SPEC:           StageType.TEST_DESIGN,
+    StageType.TEST_DESIGN:    StageType.PLAN,
     StageType.PLAN:           StageType.EXECUTE,
     StageType.EXECUTE:        StageType.VERIFY,
     StageType.VERIFY:         StageType.REVIEW,
-    StageType.REPAIR:         StageType.VERIFY,   # 修复后回到验证
+    StageType.REPAIR:         StageType.VERIFY,
     StageType.REVIEW:         StageType.MEMORY,
     StageType.MEMORY:         StageType.COMPLETED,
     StageType.DIRECT_EXECUTE: StageType.VERIFY,
-    StageType.COMPLETED:      None,               # 终端状态
-    StageType.ABORTED:        None,               # 终端状态
+    StageType.COMPLETED:      None,
+    StageType.ABORTED:        None,
 }
 
 # 完整标准流程（Direct Mode 除外）
 STANDARD_STAGES: list[StageType] = [
     StageType.INTAKE,
     StageType.SPEC,
+    StageType.TEST_DESIGN,
     StageType.PLAN,
     StageType.EXECUTE,
     StageType.VERIFY,
@@ -263,6 +265,38 @@ class SpecHandler(StageHandler):
         state.task_state.notes.append("[SPEC] 由 AI skill 处理 (/aicode-spec)，Python 侧透传")
         logger.info("SpecHandler: pass-through to PLAN")
         return self._complete(state, "Spec 由 AI skill 处理")
+
+
+class TestDesignStageHandler(StageHandler):
+    """测试设计处理器 —— 透传桩。
+
+    测试用例生成由 AI skill（/aicode-test-design）完成。
+    Python 侧仅在 AI 提交结果后进行校验和门禁检查。
+
+    AI 职责:
+      1. 读取 spec 产物（state.spec_entry）
+      2. 按 Schema 生成 TestDesignBundle YAML
+      3. 调用 test-design process --input <yaml> 一键校验+门禁+映射
+      4. 提交结果到 state
+    """
+
+    stage = StageType.TEST_DESIGN
+
+    def handle(self, state: RunState) -> RunState:
+        state.task_state.stage = StageType.TEST_DESIGN
+        state.task_state.notes.append(
+            "[TEST_DESIGN] 由 AI skill 处理 (/aicode-test-design)，Python 侧透传"
+        )
+        logger.info("TestDesignStageHandler: pass-through to PLAN")
+
+        # 如果已经有 test_design_bundle（从 AI 提交的 continue 恢复），直接流转
+        if state.test_design_bundle:
+            state.task_state.notes.append(
+                f"[TEST_DESIGN] 已生成 {len(state.test_case_refs)} 条用例，"
+                f"{len(state.scenario_candidate_refs)} 条 Scenario 候选"
+            )
+
+        return self._complete(state, "Test Design 由 AI skill 处理")
 
 
 class PlanHandler(StageHandler):
@@ -1836,6 +1870,7 @@ def default_handlers() -> dict[StageType, StageHandler]:
     return {
         StageType.INTAKE:         IntakeHandler(),
         StageType.SPEC:           SpecHandler(),
+        StageType.TEST_DESIGN:    TestDesignStageHandler(),
         StageType.PLAN:           PlanHandler(),
         StageType.EXECUTE:        ExecuteHandler(),
         StageType.VERIFY:         VerifyHandler(),

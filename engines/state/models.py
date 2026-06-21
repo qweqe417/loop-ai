@@ -237,6 +237,20 @@ class RunState(BaseModel):
         default=None, description="Superpowers Brainstorm 输出"
     )
 
+    # ── Test Design 阶段产物 ──
+    test_design_bundle: dict[str, Any] | None = Field(
+        default=None, description="AI 生成的 TestDesignBundle (JSON-serialized)"
+    )
+    test_design_quality_report: dict[str, Any] | None = Field(
+        default=None, description="QualityGate.evaluate() 的报告"
+    )
+    test_case_refs: list[str] = Field(
+        default_factory=list, description="所有测试用例 ID 列表"
+    )
+    scenario_candidate_refs: list[str] = Field(
+        default_factory=list, description="自动化候选 Scenario ID 列表"
+    )
+
     # ── Plan 阶段产物 ──
     plan_contracts: list[dict[str, Any]] = Field(
         default_factory=list, description="PlanContract 列表 (JSON-serialized)"

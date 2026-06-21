@@ -150,6 +150,26 @@ def main() -> int:
     p_ctx.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
     p_ctx.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
 
+    # ── test-design ──────────────────────────────
+    p_td = sub.add_parser("test-design", help="测试设计：从需求生成测试用例")
+    p_td.add_argument("action", nargs="?", default="generate",
+                      choices=["generate", "process", "export-xlsx"])
+    p_td.add_argument("--from", dest="from_path", default="",
+                      help="需求文档路径")
+    p_td.add_argument("--feature", default="",
+                      help="特性名称")
+    p_td.add_argument("--mode", default="human",
+                      choices=["human", "full", "machine"],
+                      help="输出模式: human(默认,视图A) / full(视图B) / machine(仅机器版)")
+    p_td.add_argument("--scope", default="backend",
+                      choices=["backend", "frontend", "fullstack"],
+                      help="测试范围: backend(默认) / frontend / fullstack")
+    p_td.add_argument("--format", default="json")
+    p_td.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
+    p_td.add_argument("--output", default="", help="输出文件路径（export-xlsx 使用）")
+    p_td.add_argument("--input", default="", help="输入 YAML 文件路径（与 stdin 二选一）")
+    p_td.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
+
     # ── status ───────────────────────────────────
     sub.add_parser("status", help="检查引擎状态")
 
@@ -191,6 +211,8 @@ def _dispatch(args: argparse.Namespace) -> dict:
         return _cmd_memory(args)
     elif args.command == "context":
         return _cmd_context(args)
+    elif args.command == "test-design":
+        return _cmd_test_design(args)
     elif args.command == "status":
         return _cmd_status()
     return {"success": False, "error": f"Unknown command: {args.command}"}
@@ -343,6 +365,11 @@ def _cmd_loop_continue(args: argparse.Namespace) -> dict:
         action = state.pending_action
         if action in ("brainstorm", "generate_spec"):
             state.metadata["spec_result"] = result_data
+        elif action == "generate_test_design":
+            state.test_design_bundle = result_data.get("bundle", result_data)
+            state.test_case_refs = result_data.get("test_case_ids", [])
+            state.scenario_candidate_refs = result_data.get("scenario_ids", [])
+            state.metadata["test_design_result"] = result_data
         elif action == "generate_plan":
             state.metadata["plan_result"] = result_data
         elif action == "execute_task":
@@ -519,6 +546,126 @@ def _cmd_context(args: argparse.Namespace) -> dict:
         "trimmed": bundle.trimmed,
         "content": bundle.render(),
     }
+
+
+# ── test-design ──────────────────────────────────
+
+def _cmd_test_design(args: argparse.Namespace) -> dict:
+    action = args.action
+    if action == "process":
+        return _cmd_td_process(args)
+    elif action == "export-xlsx":
+        return _cmd_td_export_xlsx(args)
+    elif action == "generate":
+        return _cmd_td_generate(args)
+    return {"success": False, "error": f"Unknown test-design action: {action}"}
+
+
+def _cmd_td_generate(args: argparse.Namespace) -> dict:
+    project_root = Path(args.project_root) if getattr(args, "project_root", "") else Path.cwd()
+    return {
+        "success": True,
+        "action": "generate",
+        "mode": args.mode,
+        "scope": args.scope,
+        "from_path": getattr(args, "from_path", "") or "",
+        "project_root": str(project_root),
+        "hint": (
+            "视图A (human): AI 读需求 → 调 Skill: example-skills:xlsx 生成 测试用例.xlsx。"
+            "视图B (full): AI 按 Schema 生成 YAML → 调 test-design process 一键校验+门禁+映射。"
+        ),
+    }
+
+
+def _read_yaml_input(args: argparse.Namespace) -> str:
+    """读取 YAML 输入：优先 --input 文件，fallback stdin。
+    自动尝试 UTF-8 / GBK 编码（Windows 兼容）。"""
+    input_path = getattr(args, "input", "")
+    if input_path:
+        raw_bytes = Path(input_path).read_bytes()
+    else:
+        raw_bytes = sys.stdin.buffer.read()
+    for enc in ("utf-8-sig", "utf-8", "gbk", "gb2312"):
+        try:
+            return raw_bytes.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def _cmd_td_process(args: argparse.Namespace) -> dict:
+    """管道模式：一次 stdin 输入 → validate + quality gate + map scenarios → 输出全量结果。"""
+    import yaml as _yaml
+    from engines.test_design.models import TestDesignBundle
+    from engines.test_design.quality_gate import QualityGate
+    from engines.test_design.scenario_mapper import ScenarioMapper
+
+    try:
+        raw = _read_yaml_input(args)
+        data = _yaml.safe_load(raw)
+        if data is None:
+            return {"success": False, "error": "Empty YAML input"}
+
+        # 1. 校验
+        bundle = TestDesignBundle(**data)
+
+        # 2. 质量门禁
+        gate = QualityGate()
+        report = gate.evaluate(bundle)
+
+        # 3. Scenario 映射
+        mapper = ScenarioMapper()
+        scenarios = mapper.map_all(bundle.test_cases)
+
+        return {
+            "success": True,
+            "action": "process",
+            "validate": {
+                "test_cases_count": len(bundle.test_cases),
+                "requirements_count": len(bundle.requirements),
+                "coverage_entries": len(bundle.coverage),
+                "open_questions": len(bundle.open_questions),
+            },
+            "quality": {
+                "passed": report.passed,
+                "errors": report.errors,
+                "warnings": report.warnings,
+                "summary": report.summary,
+                "blocked_requirements": report.blocked_requirements,
+            },
+            "scenarios": scenarios,
+            "scenarios_count": len(scenarios),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "hint": "请根据以上错误修正 YAML 结构"}
+
+
+def _cmd_td_export_xlsx(args: argparse.Namespace) -> dict:
+    """从 YAML 生成人读 xlsx（--input 文件 或 stdin）。"""
+    import yaml as _yaml
+    from engines.test_design.models import TestDesignBundle
+    from engines.test_design.xlsx_writer import write_xlsx
+
+    try:
+        raw = _read_yaml_input(args)
+        data = _yaml.safe_load(raw)
+        if data is None:
+            return {"success": False, "error": "Empty YAML input"}
+
+        bundle = TestDesignBundle(**data)
+
+        output = args.output if getattr(args, "output", "") else "测试用例.xlsx"
+        filepath = write_xlsx(bundle, output)
+
+        return {
+            "success": True,
+            "action": "export-xlsx",
+            "file": str(filepath),
+            "test_cases_count": len(bundle.test_cases),
+            "sheets": ["测试用例", "覆盖矩阵", "未决问题"],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 # ── status ───────────────────────────────────────
