@@ -1,8 +1,8 @@
 """CodexAdapter —— 把 AI Coding Loop 映射到 Codex CLI。
 
-生成 .codex/instructions.md、.codex/skills/aicode-xxx/SKILL.md、.codex/aicode/、
+生成 .codex/instructions.md、.codex/skills/aicode-xxx/karpathy.md、.codex/aicode/、
 .codex/mcp.json。
-命令前缀 /，skill 格式为目录+SKILL.md。
+命令前缀 /，skill 格式为目录+karpathy.md。
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ class CodexAdapter(ToolAdapter):
         created.append(str(loop_config_dst.relative_to(root)))
 
         # 3. Karpathy 行为准则 — 从插件源码原封不动拷贝，不让 AI 发挥
-        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "SKILL.md"
+        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "karpathy.md"
         karpathy_dst = root / self.rules_dir / "karpathy.md"
         if karpathy_src.exists():
             karpathy_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +183,7 @@ class CodexAdapter(ToolAdapter):
                 skipped.append(str(karpathy_dst.relative_to(root)))
                 logger.info("karpathy.md already exists, skipping")
         else:
-            logger.warning("karpathy SKILL.md not found at %s, skipping", karpathy_src)
+            logger.warning("karpathy karpathy.md not found at %s, skipping", karpathy_src)
 
         return {
             "success": len(errors) == 0,

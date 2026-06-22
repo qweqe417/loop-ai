@@ -61,7 +61,7 @@ class FileGenerator:
     def generate_all(self) -> list[str]:
         """生成所有文件，返回已创建的文件路径列表。
 
-        注意：不含主配置文件和规则文件 —— 这些由 AI 通过 SKILL.md 直接写入。
+        注意：不含主配置文件和规则文件 —— 这些由 AI 通过 karpathy.md 直接写入。
         Python 只负责 .ai/ 资产目录。
         """
         self._created = []

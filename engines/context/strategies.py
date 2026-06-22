@@ -38,32 +38,26 @@ def _estimate(text: str) -> int:
 # ── INTAKE ────────────────────────────────────────────────────────
 
 def intake_strategy(router: "ContextRouter", _run_state: "RunState") -> list[ContextPiece]:
-    """INTAKE: 项目地图 + CLAUDE.md 核心段 + 已有 AI 配置文件列表。
+    """INTAKE: 项目地图 + 已有 AI 配置文件列表。
 
     目标: 最快的项目理解，不深入代码。
-    预算: ~1500 tokens
+    预算: ~3000 tokens
+
+    注: CLAUDE.md / rules/*.md / karpathy.md 由 Claude Code 原生加载（Layer 0），
+    策略不再重复读取，避免浪费 token 预算。
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 项目地图 (priority=1, 必须)
-    pieces.append(router.build_project_map())
+    # 1. 项目地图 (P0 - 任务定义级别)
+    pm = router.build_project_map()
+    pm.priority = 0
+    pieces.append(pm)
 
-    # 2. CLAUDE.md 前 80 行 (priority=1, 必须)
-    claude = router.file.read_summary("CLAUDE.md", max_lines=80)
-    claude.priority = 1
-    claude.metadata["stage_relevance"] = "core project rules"
-    pieces.append(claude)
-
-    # 3. 已有 AI 配置文件列表 (priority=1)
+    # 2. 已有 AI 配置文件列表 (P1)
     existing = _list_existing_ai_files(router)
     if existing:
         existing.priority = 1
         pieces.append(existing)
-
-    # 4. .claude/rules/ 目录列表 (priority=2)
-    rules_dir = router.file.read_summary(".claude/rules/code-style.md", max_lines=30)
-    rules_dir.priority = 2
-    pieces.append(rules_dir)
 
     return pieces
 
@@ -87,7 +81,7 @@ def spec_strategy(router: "ContextRouter", run_state: "RunState") -> list[Contex
         intake_text = f"{run_state.task_intake.input_type} {run_state.task_intake.reason} ({run_state.task_intake.complexity} complexity)"
     task_desc = intake_text or run_state.task_id
     cg = router.codegraph.get_context(task_desc, max_nodes=8)
-    if cg.content and "unavailable" not in cg.content:
+    if cg is not None:
         cg.priority = 2
         pieces.append(cg)
 
@@ -114,43 +108,31 @@ def spec_strategy(router: "ContextRouter", run_state: "RunState") -> list[Contex
 # ── PLAN ──────────────────────────────────────────────────────────
 
 def plan_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """PLAN: Spec 摘要 + 相关文件签名 + 代码风格规则 + diff 预算。
+    """PLAN: 项目地图 + 相关文件签名 + 影响域 + 相关 Memory。
 
-    目标: 为 Plan 生成提供执行约束和代码风格约束。
-    预算: ~3000 tokens
+    目标: 为 Plan 生成提供代码结构和历史经验。
+    预算: ~4000 tokens
+
+    注: 代码风格规则由 Claude Code 原生加载（Layer 0），策略不再重复读取。
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 代码风格规则 (priority=1)
-    style = router.file.read_summary(".claude/rules/code-style.md", max_lines=60)
-    style.priority = 1
-    style.metadata["stage_relevance"] = "style contract for plan"
-    pieces.append(style)
+    # 1. 项目地图 (P0)
+    pm = router.build_project_map()
+    pm.priority = 0
+    pieces.append(pm)
 
-    # 2. 项目地图 (priority=2)
-    pieces.append(router.build_project_map())
-
-    # 3. 相关文件签名 (priority=2) — 用 codegraph 定位
+    # 2. 相关文件签名 (P1) — 用 codegraph 定位
     task_desc = run_state.task_id
     if run_state.task_intake:
         task_desc = run_state.task_intake.reason or run_state.task_id
     cg = router.codegraph.get_context(task_desc, max_nodes=10)
-    if cg.content and "unavailable" not in cg.content:
-        cg.priority = 2
+    if cg is not None:
+        cg.priority = 1
+        cg.metadata["relevance"] = 8
         pieces.append(cg)
 
-    # 4. 测试规则 (priority=2)
-    testing = router.file.read_summary(".claude/rules/testing.md", max_lines=40)
-    testing.priority = 2
-    pieces.append(testing)
-
-    # 5. 相关 Memory (priority=3)
-    keywords = _extract_keywords(run_state)
-    mem = router.memory.load_relevant(keywords, limit=3)
-    mem.priority = 3
-    pieces.append(mem)
-
-    # 6. 影响域 (priority=2)
+    # 3. 影响域 (P1)
     if run_state.task_intake:
         impact = _format_intake_impact(run_state)
         pieces.append(ContextPiece(
@@ -158,8 +140,15 @@ def plan_strategy(router: "ContextRouter", run_state: "RunState") -> list[Contex
             path="task_intake",
             content=impact,
             token_estimate=_estimate(impact),
-            priority=2,
+            priority=1,
+            metadata={"relevance": 7},
         ))
+
+    # 4. 相关 Memory (P3 - 始终 pointer)
+    keywords = _extract_keywords(run_state)
+    mem = router.memory.load_relevant(keywords, limit=5)
+    mem.priority = 3
+    pieces.append(mem)
 
     return pieces
 
@@ -167,34 +156,33 @@ def plan_strategy(router: "ContextRouter", run_state: "RunState") -> list[Contex
 # ── EXECUTE / DIRECT_EXECUTE ─────────────────────────────────────
 
 def execute_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """EXECUTE: 修改文件全文 + 调用链 + style contract + 禁止文件列表。
+    """EXECUTE: 修改文件 + 调用链 + 禁止文件 + Memory。
 
     目标: 精确修改所需文件，不越界。
-    预算: ~4000 tokens
+    预算: ~6000 tokens (P1+P2 共享)
 
-    和 DIRECT_EXECUTE 的区别：DIRECT 预算更紧 (2500)。
+    和 DIRECT_EXECUTE 的区别：DIRECT 预算更紧 (3000)，无 Spec/Plan 引导。
+
+    注：code-style.md / safety.md / karpathy.md 由 Claude Code 原生加载（Layer 0），
+    策略不再重复读取。
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 修改文件 (priority=1) — 从 run_state 中提取 allowed files
-    # 注：code-style.md / safety.md / karpathy.md 由 Claude Code 原生加载，
-    # ContextRouter 不再重复读取，避免浪费 I/O 和 token 预算
-    # 优化: 使用 read_smart() — 小文件全文，大文件头+符号大纲
+    # 1. 修改文件 (P0/P1) — 从 run_state 中提取 allowed files
     MAX_FULL_FILES = 3
-    key_symbols = _extract_key_symbols(run_state)
     allowed_files = _extract_allowed_files(run_state)
     if allowed_files:
         for i, f in enumerate(allowed_files):
             if i < MAX_FULL_FILES:
-                # 智能读取: 小文件全文，大文件仅头+大纲 (节省 token)
                 cf = router.file.read_smart(f, max_header=60, max_full=300)
                 cf.priority = 1
+                cf.metadata["relevance"] = 10 - i  # 前 3 个相关度递减
                 cf.metadata["stage_relevance"] = "file to modify"
                 pieces.append(cf)
             else:
-                # 超出上限的文件仅列出路径，不加载内容
                 summary = router.file.read_summary(f, max_lines=10)
                 summary.priority = 2
+                summary.metadata["relevance"] = 5
                 summary.metadata["stage_relevance"] = "additional allowed file (summary only)"
                 pieces.append(summary)
         if len(allowed_files) > MAX_FULL_FILES:
@@ -203,27 +191,24 @@ def execute_strategy(router: "ContextRouter", run_state: "RunState") -> list[Con
                 len(allowed_files), MAX_FULL_FILES,
             )
     else:
-        # 无明确 files 时用 codegraph 定位
+        # 无明确 files 时用 codegraph 定位 (P0)
         task_desc = run_state.task_id
         cg = router.codegraph.get_context(task_desc, max_nodes=6)
-        if cg.content and "unavailable" not in cg.content:
-            cg.priority = 1
+        if cg is not None:
+            cg.priority = 0
+            cg.metadata["relevance"] = 10
             pieces.append(cg)
 
-    # 2. 调用链分析 — 对关键符号做 impact 分析 (priority=2)
+    # 2. 调用链分析 — 对关键符号做 impact 分析 (P1)
     key_symbols = _extract_key_symbols(run_state)
-    for sym in key_symbols[:3]:
+    for i, sym in enumerate(key_symbols[:3]):
         imp = router.codegraph.get_impact(sym, depth=1)
-        if imp.content and "unavailable" not in imp.content:
+        if imp is not None:
+            imp.priority = 1
+            imp.metadata["relevance"] = 8 - i
             pieces.append(imp)
 
-    # 3. 相关 Memory（少一点）(priority=3)
-    keywords = _extract_keywords(run_state)
-    mem = router.memory.load_relevant(keywords, limit=3)
-    mem.priority = 3
-    pieces.append(mem)
-
-    # 4. 禁止文件列表 (priority=2)
+    # 3. 禁止文件列表 (P1)
     forbidden = _extract_forbidden_files(run_state)
     if forbidden:
         pieces.append(ContextPiece(
@@ -231,8 +216,15 @@ def execute_strategy(router: "ContextRouter", run_state: "RunState") -> list[Con
             path="forbidden_files",
             content="**FORBIDDEN files — do NOT modify:**\n" + "\n".join(f"- {f}" for f in forbidden),
             token_estimate=_estimate("\n".join(forbidden)),
-            priority=2,
+            priority=1,
+            metadata={"relevance": 9},
         ))
+
+    # 4. 相关 Memory (P3 - 始终 pointer)
+    keywords = _extract_keywords(run_state)
+    mem = router.memory.load_relevant(keywords, limit=5)
+    mem.priority = 3
+    pieces.append(mem)
 
     return pieces
 
@@ -253,31 +245,29 @@ def direct_execute_strategy(router: "ContextRouter", run_state: "RunState") -> l
 # ── VERIFY ────────────────────────────────────────────────────────
 
 def verify_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """VERIFY: Scenario 定义 + 被修改文件路径 + 验收标准。
+    """VERIFY: Scenario 定义 + 被修改文件 + 相关失败记忆。
 
     目标: 跑场景验证，不重新理解全项目。
-    预算: ~2500 tokens
+    预算: ~4000 tokens
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 场景定义 (priority=1)
+    # 1. 场景定义 (P0)
     scenario_ids = _extract_scenario_ids(run_state)
     if scenario_ids:
         for sid in scenario_ids:
-            # 查找 .ai/scenarios/ 下的场景文件
             sc_path = f".ai/scenarios/{sid}.yaml"
             sc = router.file.read_full(sc_path)
-            sc.priority = 1
+            sc.priority = 0
             sc.metadata["stage_relevance"] = "scenario to verify"
             pieces.append(sc)
     else:
-        # fallback: 列出所有场景
         sc_list = _list_ai_dir(router, "scenarios")
         if sc_list:
-            sc_list.priority = 1
+            sc_list.priority = 0
             pieces.append(sc_list)
 
-    # 2. 被修改文件列表 (priority=2)
+    # 2. 被修改文件列表 (P1)
     changed = _extract_changed_files_from_checkpoints(run_state)
     if changed:
         pieces.append(ContextPiece(
@@ -285,13 +275,15 @@ def verify_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
             path="changed_files",
             content="**Files changed in this task:**\n" + "\n".join(f"- {f}" for f in changed),
             token_estimate=_estimate("\n".join(changed)),
-            priority=2,
+            priority=1,
+            metadata={"relevance": 8},
         ))
 
-    # 3. 验证命令 (priority=1)
-    test_cmd = router.file.read_summary(".claude/rules/testing.md", max_lines=30)
-    test_cmd.priority = 1
-    pieces.append(test_cmd)
+    # 3. 相关失败记忆 (P1)
+    mem = router.memory.load_recent_failures(limit=5)
+    mem.priority = 1
+    mem.metadata["relevance"] = 7
+    pieces.append(mem)
 
     return pieces
 
@@ -299,48 +291,55 @@ def verify_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
 # ── REPAIR ────────────────────────────────────────────────────────
 
 def repair_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """REPAIR: 失败上下文 + 出错文件全文 + 调用链 + 相关日志。
+    """REPAIR: 失败上下文 + 出错文件全文 + 调用链 + 失败记忆。
 
     目标: 快速定位根因、最小修复。
-    预算: ~3500 tokens
+    预算: ~5000 tokens
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 失败摘要 (priority=1)
+    # 1. 失败摘要 (P0)
     failures = run_state.failures
     if failures:
         fail_text = "**Recent Failures:**\n"
-        for f in failures[-3:]:  # 最近 3 条
+        for f in failures[-5:]:
             fail_text += f"- [{f.category}] {f.message} (attempt {f.attempt_count})\n"
         pieces.append(ContextPiece(
             source="run_state",
             path="failures",
             content=fail_text,
             token_estimate=_estimate(fail_text),
-            priority=1,
+            priority=0,
+            metadata={"relevance": 10},
         ))
 
-    # 2. 失败相关文件全文 (priority=1)
+    # 2. 失败相关文件全文 (P1)
     changed = _extract_changed_files_from_checkpoints(run_state)
-    for f in changed[:3]:
+    for i, f in enumerate(changed[:3]):
         cf = router.file.read_full(f)
         cf.priority = 1
+        cf.metadata["relevance"] = 9 - i
         cf.metadata["stage_relevance"] = "file related to failure"
         pieces.append(cf)
 
-    # 3. 调用链 — 帮助理解影响范围 (priority=2)
+    # 3. 调用链 — 帮助理解影响范围 (P1)
     key_symbols = _extract_key_symbols(run_state)
-    for sym in key_symbols[:2]:
+    for i, sym in enumerate(key_symbols[:3]):
         callers = router.codegraph.get_callers(sym)
-        if callers.content and "unavailable" not in callers.content:
+        if callers is not None:
+            callers.priority = 1
+            callers.metadata["relevance"] = 7 - i
             pieces.append(callers)
         callees = router.codegraph.get_callees(sym)
-        if callees.content and "unavailable" not in callees.content:
+        if callees is not None:
+            callees.priority = 2
+            callees.metadata["relevance"] = 6 - i
             pieces.append(callees)
 
-    # 4. 相关失败记忆 (priority=2)
-    mem = router.memory.load_recent_failures(limit=3)
-    mem.priority = 2
+    # 4. 相关失败记忆 (P1，高相关)
+    mem = router.memory.load_recent_failures(limit=5)
+    mem.priority = 1
+    mem.metadata["relevance"] = 8
     pieces.append(mem)
 
     return pieces
@@ -349,25 +348,16 @@ def repair_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
 # ── REVIEW ────────────────────────────────────────────────────────
 
 def review_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """REVIEW: diff 摘要 + Plan 合规清单 + 变更文件列表 + Guard 规则。
+    """REVIEW: diff 摘要 + Plan 合规清单 + 变更文件 + Memory。
 
-    目标: 检查是否越界、是否满足 Spec、是否风格合规。
-    预算: ~3000 tokens
+    目标: 检查是否越界、是否满足 Spec。
+    预算: ~5000 tokens
+
+    注: 风格/安全规则由 Claude Code 原生加载（Layer 0），策略不再重复读取。
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 风格规则 (priority=1)
-    style = router.file.read_summary(".claude/rules/code-style.md", max_lines=40)
-    style.priority = 1
-    pieces.append(style)
-
-    # 2. 安全规则 (priority=1)
-    safety = router.file.read_summary(".claude/rules/safety.md", max_lines=30)
-    if safety.content.strip():
-        safety.priority = 1
-        pieces.append(safety)
-
-    # 3. 变更文件列表 (priority=1)
+    # 1. 变更文件列表 (P0)
     changed = _extract_changed_files_from_checkpoints(run_state)
     if changed:
         pieces.append(ContextPiece(
@@ -375,10 +365,11 @@ def review_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
             path="changed_files",
             content="**Files to review:**\n" + "\n".join(f"- {f}" for f in changed),
             token_estimate=_estimate("\n".join(changed)),
-            priority=1,
+            priority=0,
+            metadata={"relevance": 10},
         ))
 
-    # 4. Plan 合规清单 (priority=2)
+    # 2. Plan 合规清单 (P1)
     if run_state.task_state:
         compliance = run_state.task_state.plan_compliance or "not assessed"
         pieces.append(ContextPiece(
@@ -386,8 +377,15 @@ def review_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
             path="plan_compliance",
             content=f"Plan Compliance: {compliance}",
             token_estimate=_estimate(compliance),
-            priority=2,
+            priority=1,
+            metadata={"relevance": 8},
         ))
+
+    # 3. 相关 Memory — 禁止事项 (P3 - pointer)
+    keywords = _extract_keywords(run_state)
+    mem = router.memory.load_relevant(keywords, limit=5)
+    mem.priority = 3
+    pieces.append(mem)
 
     return pieces
 
@@ -395,14 +393,14 @@ def review_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
 # ── MEMORY ────────────────────────────────────────────────────────
 
 def memory_strategy(router: "ContextRouter", run_state: "RunState") -> list[ContextPiece]:
-    """MEMORY: Session 摘要 + failures + decisions + 候选记忆。
+    """MEMORY: Session 摘要 + failures + decisions + 现有记忆。
 
     目标: 从中筛出值得沉淀的经验。
-    预算: ~2000 tokens
+    预算: ~3000 tokens
     """
     pieces: list[ContextPiece] = []
 
-    # 1. 失败记录摘要 (priority=1)
+    # 1. 失败记录摘要 (P0)
     if run_state.failures:
         fail_text = "**Failures in this session:**\n"
         for f in run_state.failures:
@@ -412,10 +410,11 @@ def memory_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
             path="session_failures",
             content=fail_text,
             token_estimate=_estimate(fail_text),
-            priority=1,
+            priority=0,
+            metadata={"relevance": 10},
         ))
 
-    # 2. 检查点摘要 (priority=2)
+    # 2. 检查点摘要 (P1)
     if run_state.checkpoints:
         cp_text = "**Checkpoints:**\n"
         for cp in run_state.checkpoints:
@@ -425,10 +424,11 @@ def memory_strategy(router: "ContextRouter", run_state: "RunState") -> list[Cont
             path="checkpoints",
             content=cp_text,
             token_estimate=_estimate(cp_text),
-            priority=2,
+            priority=1,
+            metadata={"relevance": 8},
         ))
 
-    # 3. 当前 memory 状态 (priority=3)
+    # 3. 当前 memory 全量 (P3 - pointer)
     mem_full = router.memory.load_all()
     if mem_full:
         pieces.append(ContextPiece(

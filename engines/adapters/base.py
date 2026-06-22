@@ -114,7 +114,7 @@ class ToolAdapter(ABC):
     def skill_format(self) -> str:
         """Skill 文件格式:
         "single_md"          — .claude/skills/xxx.md（Claude Code）
-        "dir_with_skill_md"  — .codex/skills/xxx/SKILL.md（Codex）
+        "dir_with_skill_md"  — .codex/skills/xxx/karpathy.md（Codex）
         "rule_md"            — .cursor/rules/xxx.md（Cursor）
         """
         ...

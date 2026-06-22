@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # 安全上限
-DEFAULT_MAX_ITERATIONS = 100
+DEFAULT_MAX_ITERATIONS = 30
 # 子循环上限（更短）
 SUB_LOOP_MAX_ITERATIONS = 30
 # 熔断阈值：同一失败签名重复 N 次后强制终止
@@ -65,7 +65,7 @@ class LoopRunner:
         entry_stage: 强制入口阶段（None 则沿用 state.current_stage）
         exit_on_stages: 到达这些阶段时退出（默认 COMPLETED / ABORTED）
         flow: 自定义流转表（None 则用 DEFAULT_FLOW）
-        guard: Guard 引擎实例
+        review: ReviewEngine 实例（可选，每轮迭代前运行 Layer1 检查）
     """
 
     def __init__(
@@ -75,14 +75,14 @@ class LoopRunner:
         entry_stage: StageType | None = None,
         exit_on_stages: set[StageType] | None = None,
         flow: dict[StageType, StageType | None] | None = None,
-        guard: object | None = None,
+        review: object | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
     ):
         self.handlers = handlers or default_handlers()
         self.entry_stage = entry_stage
         self.exit_on_stages = exit_on_stages or DEFAULT_EXIT_STAGES
         self._flow = flow or DEFAULT_FLOW
-        self.guard = guard
+        self.review = review
         self.max_iterations = max_iterations
 
     # ── 流转表 ────────────────────────────────────────────────
@@ -123,9 +123,9 @@ class LoopRunner:
             if self.is_exit(state.current_stage):
                 return self._finalize(state)
 
-            # 2. Guard 检查
-            if self.guard is not None:
-                blocked = self._run_guard_check(state)
+            # 2. Review 检查（可选，每轮迭代前运行 Layer1）
+            if self.review is not None:
+                blocked = self._run_review_check(state)
                 if blocked:
                     return state
 
@@ -276,20 +276,6 @@ class LoopRunner:
         normalized = re.sub(r'[\w/\\]+\.\w{1,4}', 'FILE', normalized)
         return f"{failure.stage.value}|{failure.category.value}|{normalized}"
 
-    @staticmethod
-    def _failure_message_signature(failure) -> str:
-        """跨阶段签名: category + 规范化消息（忽略 stage 差异）。"""
-        import re
-
-        msg = failure.message[:120]
-        normalized = re.sub(r'\d+', 'N', msg)
-        normalized = re.sub(
-            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
-            'UUID', normalized,
-        )
-        normalized = re.sub(r'[\w/\\]+\.\w{1,4}', 'FILE', normalized)
-        return f"{failure.category.value}|{normalized}"
-
     # ── 决策应用 ──────────────────────────────────────────────
 
     def _apply_decision(self, state: RunState) -> RunState:
@@ -343,34 +329,34 @@ class LoopRunner:
 
         return state
 
-    # ── Guard 检查 ────────────────────────────────────────────
+    # ── Review 检查 ────────────────────────────────────────────
 
-    def _run_guard_check(self, state: RunState) -> bool:
-        """执行 Guard 检查，返回 True 表示被阻止。"""
+    def _run_review_check(self, state: RunState) -> bool:
+        """执行 Review Layer1 检查，返回 True 表示被阻止。"""
         try:
-            result = self.guard.check(state)  # type: ignore[union-attr]
+            result = self.review.check(state)  # type: ignore[union-attr]
             if getattr(result, "block", False):
-                logger.warning("Guard blocked: %s", getattr(result, "reason", ""))
+                logger.warning("Review blocked: %s", getattr(result, "reason", ""))
                 from engines.state.models import LoopDecision
 
                 state.decision = LoopDecision(
                     action=LoopAction.STOP_GUARD,
                     target_stage=StageType.ABORTED,
-                    reason=getattr(result, "reason", "Guard 拦截"),
+                    reason=getattr(result, "reason", "Review 拦截"),
                 )
                 state.current_stage = StageType.ABORTED
                 return True
         except AttributeError:
-            logger.debug("Guard object has no check() method, skipping")
+            logger.debug("Review object has no check() method, skipping")
         except Exception as exc:
-            # Guard 异常时默认阻止，防止安全检查被绕过
-            logger.exception("Guard check raised exception, blocking to be safe: %s", exc)
+            # Review 异常时默认阻止，防止安全检查被绕过
+            logger.exception("Review check raised exception, blocking to be safe: %s", exc)
             from engines.state.models import LoopDecision
 
             state.decision = LoopDecision(
                 action=LoopAction.STOP_GUARD,
                 target_stage=StageType.ABORTED,
-                reason=f"Guard 异常: {exc}",
+                reason=f"Review 异常: {exc}",
             )
             state.current_stage = StageType.ABORTED
             return True

@@ -110,7 +110,7 @@ class InitRunner:
 
         Python 只负责：扫描 + .ai/ 资产 + adapter 安装。
         主配置文件和规则文件（CLAUDE.md / rules/*.md）由 AI 通过
-        `/aicode-init` SKILL.md 直接写入 —— Python 不碰配置内容。
+        `/aicode-init` karpathy.md 直接写入 —— Python 不碰配置内容。
 
         Args:
             install_missing: 是否自动安装缺失插件
@@ -209,7 +209,7 @@ class InitRunner:
     ) -> InitReport:
         """仅生成 .ai/ 资产 + adapter.install()，跳过主配置文件生成。
 
-        用于 /aicode-init SKILL.md 流程：
+        用于 /aicode-init karpathy.md 流程：
         AI 已直接写入 CLAUDE.md / rules/*.md 等配置文件，
         Python 只需初始化 .ai/ 目录结构和 adapter skill/hook/MCP 文件。
         """

@@ -125,6 +125,7 @@ class DataAssertion(BaseModel):
     operator: str = Field(default="eq", description="eq / exists / not_exists / count / contains")
     expected: Any = Field(default=None, description="期望值")
     message: str = Field(default="", description="断言说明")
+    inferred_source: str = Field(default="", description="来源标注: spec | plan | codebase | ai")
 
 
 # ── DOM 断言（前端）─────────────────────────────────────────────────
@@ -186,6 +187,7 @@ class RequirementItem(BaseModel):
     risk_level: RiskLevel = Field(default=RiskLevel.MEDIUM)
     description: str = Field(default="")
     acceptance_criteria: list[str] = Field(default_factory=list)
+    source: str = Field(default="spec", description="业务规则来源: spec | prd | ai_inferred")
 
 
 class TestCase(BaseModel):
@@ -250,7 +252,10 @@ class TestDesignBundle(BaseModel):
     version: int = Field(default=1)
     feature: str = Field(default="", description="特性名称")
     scope: Scope = Field(default=Scope.BACKEND, description="测试范围")
-    source: dict[str, str] = Field(default_factory=dict, description="{type, path}")
+    source: dict[str, Any] = Field(
+        default_factory=dict,
+        description="{spec: {type, path}, plan: {path, status: full|degraded}}"
+    )
 
     requirements: list[RequirementItem] = Field(default_factory=list)
     test_cases: list[TestCase] = Field(default_factory=list)

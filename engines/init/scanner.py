@@ -231,7 +231,7 @@ class ProjectScanner:
         # ── 内部模块（引擎自带，不算插件） ──
         internal_modules = {
             "scenario-runner": ("engines.scenario", "ScenarioRunner"),
-            "guard-engine": ("engines.guard", "Guard"),
+            "review-engine": ("engines.review", "ReviewEngine"),
             "memory-store": ("engines.memory", "MemoryStore"),
         }
         p.internal_modules = {}

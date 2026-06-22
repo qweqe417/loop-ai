@@ -51,6 +51,7 @@ def _req_to_dict(req: RequirementItem) -> dict[str, Any]:
         "risk_level": req.risk_level.value,
         "description": req.description,
         "acceptance_criteria": req.acceptance_criteria,
+        "source": req.source,
     }
 
 
@@ -104,6 +105,7 @@ def _tc_to_dict(tc: TestCase) -> dict[str, Any]:
         exp["data_assertions"] = [{
             "type": da.type, "target": da.target,
             "operator": da.operator, "expected": da.expected, "message": da.message,
+            "inferred_source": da.inferred_source,
         } for da in tc.expected.data_assertions]
     if tc.expected.dom_assertions:
         exp["dom_assertions"] = [{
@@ -209,6 +211,7 @@ def _dict_to_bundle(data: dict[str, Any]) -> TestDesignBundle:
             risk_level=r.get("risk_level", "medium"),
             description=r.get("description", ""),
             acceptance_criteria=r.get("acceptance_criteria", []),
+            source=r.get("source", "spec"),
         ))
     test_cases = [_dict_to_tc(tc) for tc in data.get("test_cases", [])]
     coverage = [CoverageEntry(**c) for c in data.get("coverage", [])]
@@ -264,6 +267,7 @@ def _dict_to_tc(d: dict[str, Any]) -> TestCase:
             type=da.get("type", "mysql"), target=da.get("target", ""),
             operator=da.get("operator", "eq"), expected=da.get("expected"),
             message=da.get("message", ""),
+            inferred_source=da.get("inferred_source", ""),
         ))
     dom_assertions = []
     for da in exp_data.get("dom_assertions", []):

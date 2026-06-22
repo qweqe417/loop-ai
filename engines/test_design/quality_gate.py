@@ -49,6 +49,8 @@ class QualityGate:
         self._check_cleanup(bundle, errors)
 
         # 软警告
+        self._check_source_plan_degraded(bundle, warnings)
+        self._check_inferred_source_ratio(bundle, warnings)
         self._check_negative_coverage_ratio(bundle, warnings)
         self._check_level_distribution(bundle, warnings)
         self._check_preconditions(bundle, warnings)
@@ -194,6 +196,28 @@ class QualityGate:
         missing = [tc.id for tc in bundle.test_cases if not tc.preconditions]
         if missing:
             msg = f"以下用例缺少前置条件: {', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}"
+            warnings.append(msg)
+            logger.warning("SOFT WARN: %s", msg)
+
+    def _check_source_plan_degraded(self, bundle, warnings):
+        """降级模式警告 —— source.plan.status == degraded 时提醒用户补 Plan。"""
+        plan_status = bundle.source.get("plan", {}).get("status", "")
+        if plan_status == "degraded":
+            msg = "缺少 Plan 文件，接口路径/数据变化靠 AI 推断（标记 inferred_source: ai），建议运行 /aicode-plan 后重新生成"
+            warnings.append(msg)
+            logger.warning("SOFT WARN: %s", msg)
+
+    def _check_inferred_source_ratio(self, bundle, warnings):
+        """AI 推断比例过高警告 —— inferred_source=ai 的数据断言超过 50%。"""
+        total = 0
+        ai_inferred = 0
+        for tc in bundle.test_cases:
+            for da in tc.expected.data_assertions:
+                total += 1
+                if da.inferred_source == "ai":
+                    ai_inferred += 1
+        if total > 0 and ai_inferred / total > 0.5:
+            msg = f"数据断言中 AI 推断占比 {ai_inferred/total:.0%}（{ai_inferred}/{total}），建议提供 PRD/Spec + Plan 后重新生成"
             warnings.append(msg)
             logger.warning("SOFT WARN: %s", msg)
 

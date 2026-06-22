@@ -239,10 +239,10 @@ class FileSource:
 # ── CodeGraph 来源 ────────────────────────────────────────────────
 
 class CodeGraphSource:
-    """调用 CodeGraph MCP 工具获取结构化代码信息。
+    """通过 CodeGraph CLI 获取结构化代码信息。
 
-    直接调 MCP 工具，不封装、不抽象。没有 .codegraph/ 时 marked unavailable，
-    Router 自动 fallback 到 FileSource.scan_structure()。
+    当 .codegraph/ 索引不存在或 CLI 不可用时，所有方法返回 None，
+    策略层自动 fallback 到 FileSource 或静默跳过。
     """
 
     def __init__(self, project_root: str | Path = ".") -> None:
@@ -255,101 +255,91 @@ class CodeGraphSource:
 
     # ── 项目地图 ──────────────────────────────────────
 
-    def get_project_map(self) -> ContextPiece:
-        """获取项目文件结构（codegraph_files）。"""
+    def get_project_map(self) -> ContextPiece | None:
+        """获取项目文件结构（codegraph files）。"""
         if not self.available:
-            return ContextPiece(source="codegraph", path="", content="[codegraph unavailable]", priority=3)
-        try:
-            raw = _invoke_codegraph("codegraph_files", {"format": "tree"})
-            return ContextPiece(
-                source="codegraph",
-                path="project_map",
-                content=raw,
-                token_estimate=_estimate(raw),
-                priority=1,
-                metadata={"provider": "codegraph_files"},
-            )
-        except Exception as e:
-            logger.warning("codegraph_files failed: %s", e)
-            return ContextPiece(source="codegraph", path="", content=f"[error: {e}]", priority=3)
+            return None
+        raw = _invoke_codegraph("codegraph_files", {"format": "tree"})
+        if raw is None:
+            return None
+        return ContextPiece(
+            source="codegraph",
+            path="project_map",
+            content=raw,
+            token_estimate=_estimate(raw),
+            priority=1,
+            metadata={"provider": "codegraph_files"},
+        )
 
     # ── 上下文查询 ────────────────────────────────────
 
-    def get_context(self, task: str, max_nodes: int = 12) -> ContextPiece:
+    def get_context(self, task: str, max_nodes: int = 12) -> ContextPiece | None:
         """用任务描述查 codegraph，返回入口点 + 相关符号 + 代码。"""
         if not self.available:
-            return ContextPiece(source="codegraph", path="", content="[codegraph unavailable]", priority=3)
-        try:
-            raw = _invoke_codegraph("codegraph_context", {
-                "task": task,
-                "maxNodes": max_nodes,
-                "includeCode": True,
-            })
-            return ContextPiece(
-                source="codegraph",
-                path=f"context:{_snip(task, 40)}",
-                content=raw,
-                token_estimate=_estimate(raw),
-                priority=2,
-                metadata={"provider": "codegraph_context", "task": task},
-            )
-        except Exception as e:
-            logger.warning("codegraph_context failed: %s", e)
-            return ContextPiece(source="codegraph", path="", content=f"[error: {e}]", priority=3)
+            return None
+        raw = _invoke_codegraph("codegraph_context", {
+            "task": task,
+            "maxNodes": max_nodes,
+            "includeCode": True,
+        })
+        if raw is None:
+            return None
+        return ContextPiece(
+            source="codegraph",
+            path=f"context:{_snip(task, 40)}",
+            content=raw,
+            token_estimate=_estimate(raw),
+            priority=2,
+            metadata={"provider": "codegraph_context", "task": task},
+        )
 
-    def get_impact(self, symbol: str, depth: int = 2) -> ContextPiece:
+    def get_impact(self, symbol: str, depth: int = 2) -> ContextPiece | None:
         """分析修改一个符号的影响范围。"""
         if not self.available:
-            return ContextPiece(source="codegraph", path="", content="[codegraph unavailable]", priority=3)
-        try:
-            raw = _invoke_codegraph("codegraph_impact", {"symbol": symbol, "depth": depth})
-            return ContextPiece(
-                source="codegraph",
-                path=f"impact:{symbol}",
-                content=raw,
-                token_estimate=_estimate(raw),
-                priority=1,
-                metadata={"provider": "codegraph_impact", "symbol": symbol},
-            )
-        except Exception as e:
-            logger.warning("codegraph_impact failed: %s", e)
-            return ContextPiece(source="codegraph", path="", content=f"[error: {e}]", priority=3)
+            return None
+        raw = _invoke_codegraph("codegraph_impact", {"symbol": symbol, "depth": depth})
+        if raw is None:
+            return None
+        return ContextPiece(
+            source="codegraph",
+            path=f"impact:{symbol}",
+            content=raw,
+            token_estimate=_estimate(raw),
+            priority=1,
+            metadata={"provider": "codegraph_impact", "symbol": symbol},
+        )
 
-    def get_callers(self, symbol: str, limit: int = 10) -> ContextPiece:
+    def get_callers(self, symbol: str, limit: int = 10) -> ContextPiece | None:
         """查找谁调用了指定符号。"""
         if not self.available:
-            return ContextPiece(source="codegraph", path="", content="[codegraph unavailable]", priority=3)
-        try:
-            raw = _invoke_codegraph("codegraph_callers", {"symbol": symbol, "limit": limit})
-            return ContextPiece(
-                source="codegraph",
-                path=f"callers:{symbol}",
-                content=raw,
-                token_estimate=_estimate(raw),
-                priority=2,
-                metadata={"provider": "codegraph_callers", "symbol": symbol},
-            )
-        except Exception as e:
-            logger.warning("codegraph_callers failed: %s", e)
-            return ContextPiece(source="codegraph", path="", content=f"[error: {e}]", priority=3)
+            return None
+        raw = _invoke_codegraph("codegraph_callers", {"symbol": symbol, "limit": limit})
+        if raw is None:
+            return None
+        return ContextPiece(
+            source="codegraph",
+            path=f"callers:{symbol}",
+            content=raw,
+            token_estimate=_estimate(raw),
+            priority=2,
+            metadata={"provider": "codegraph_callers", "symbol": symbol},
+        )
 
-    def get_callees(self, symbol: str, limit: int = 10) -> ContextPiece:
+    def get_callees(self, symbol: str, limit: int = 10) -> ContextPiece | None:
         """查找指定符号调用了谁。"""
         if not self.available:
-            return ContextPiece(source="codegraph", path="", content="[codegraph unavailable]", priority=3)
-        try:
-            raw = _invoke_codegraph("codegraph_callees", {"symbol": symbol, "limit": limit})
-            return ContextPiece(
-                source="codegraph",
-                path=f"callees:{symbol}",
-                content=raw,
-                token_estimate=_estimate(raw),
-                priority=2,
-                metadata={"provider": "codegraph_callees", "symbol": symbol},
-            )
-        except Exception as e:
-            logger.warning("codegraph_callees failed: %s", e)
-            return ContextPiece(source="codegraph", path="", content=f"[error: {e}]", priority=3)
+            return None
+        raw = _invoke_codegraph("codegraph_callees", {"symbol": symbol, "limit": limit})
+        if raw is None:
+            return None
+        return ContextPiece(
+            source="codegraph",
+            path=f"callees:{symbol}",
+            content=raw,
+            token_estimate=_estimate(raw),
+            priority=2,
+            metadata={"provider": "codegraph_callees", "symbol": symbol},
+        )
 
 
 # ── Memory 来源 ───────────────────────────────────────────────────
@@ -456,30 +446,87 @@ def _summarize_file(head: str, total_lines: int) -> str:
 
 
 
-def _invoke_codegraph(tool: str, params: dict) -> str:
-    """调用 CodeGraph MCP 工具（跨进程调用，薄封装）。
+# ── CodeGraph CLI 子命令映射 ──────────────────────────────────────
+# 将逻辑工具名映射到 codegraph CLI 的实际子命令和参数构建方式
 
-    优先级:
-      1. codegraph CLI (如果可用)
-      2. 返回提示消息引导使用 MCP tool
+def _build_codegraph_cmd(tool: str, params: dict) -> list[str]:
+    """将逻辑工具名映射为 codegraph CLI 子命令 + 参数列表。
+
+    codegraph CLI 子命令（v1.0.1+）:
+        files, explore <query>, node <name>, query <search>,
+        callers <symbol>, callees <symbol>, impact <symbol>
+    """
+    if tool == "codegraph_files":
+        return ["codegraph", "files"]
+    elif tool == "codegraph_explore":
+        query = params.get("query", params.get("task", ""))
+        max_files = params.get("maxFiles", params.get("max_files", 12))
+        cmd = ["codegraph", "explore", query]
+        if max_files:
+            cmd.extend(["--max-files", str(max_files)])
+        return cmd
+    elif tool == "codegraph_node":
+        symbol = params.get("symbol", "")
+        include_code = params.get("includeCode", params.get("include_code", True))
+        cmd = ["codegraph", "node", symbol]
+        if include_code:
+            cmd.append("--include-code")
+        file = params.get("file", "")
+        if file:
+            cmd.extend(["--file", file])
+        return cmd
+    elif tool == "codegraph_context":
+        # codegraph_context → codegraph explore (语义等价)
+        query = params.get("task", "")
+        max_nodes = params.get("maxNodes", params.get("max_nodes", 12))
+        cmd = ["codegraph", "explore", query]
+        if max_nodes:
+            cmd.extend(["--max-files", str(max_nodes)])
+        return cmd
+    elif tool == "codegraph_search":
+        return ["codegraph", "query", params.get("query", params.get("symbol", ""))]
+    elif tool == "codegraph_callers":
+        symbol = params.get("symbol", "")
+        limit = params.get("limit", 20)
+        return ["codegraph", "callers", symbol, "--limit", str(limit)]
+    elif tool == "codegraph_callees":
+        symbol = params.get("symbol", "")
+        limit = params.get("limit", 20)
+        return ["codegraph", "callees", symbol, "--limit", str(limit)]
+    elif tool == "codegraph_impact":
+        symbol = params.get("symbol", "")
+        depth = params.get("depth", 1)
+        return ["codegraph", "impact", symbol, "--depth", str(depth)]
+    else:
+        return ["codegraph", "query", str(params)]
+
+
+def _invoke_codegraph(tool: str, params: dict) -> str | None:
+    """调用 CodeGraph CLI 子命令，返回 stdout 或 None。
+
+    当 codegraph CLI 不可用或 .codegraph/ 索引不存在时返回 None，
+    调用方应静默跳过，不注入任何占位噪音。
     """
     if not _is_codegraph_available():
-        return (
-            f"[CodeGraph {tool}: CLI 不可用]\n"
-            "提示: 运行 'codegraph init' 初始化项目索引，"
-            "或通过 MCP server 连接 CodeGraph。\n"
-            f"Params: {json.dumps(params)}"
-        )
+        return None
 
     try:
+        cmd = _build_codegraph_cmd(tool, params)
         result = subprocess.run(
-            ["codegraph", "query", "--tool", tool, "--params", json.dumps(params)],
+            cmd,
             capture_output=True, text=True,
             cwd=str(Path.cwd()),
             timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout
-        return f"[CodeGraph {tool}: no output]\nParams: {json.dumps(params)}"
+            return result.stdout.strip()
+        # 有 stderr 信息时记录但不返回（如 "no results" 不是错误）
+        if result.stderr.strip():
+            logger.debug("codegraph %s stderr: %s", tool, result.stderr.strip()[:200])
+        return None
+    except FileNotFoundError:
+        logger.debug("codegraph CLI not found on PATH")
+        return None
     except Exception as e:
-        return f"[CodeGraph {tool}: {e}]"
+        logger.debug("codegraph %s failed: %s", tool, e)
+        return None

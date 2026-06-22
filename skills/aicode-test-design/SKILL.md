@@ -30,26 +30,108 @@ description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope b
 ## 触发方式
 
 ```bash
-# 视图A（默认人读 → 输出 .xlsx）
+# 视图A（默认人读 → 输出 .xlsx，只需需求文档）
 /aicode-test-design --from docs/spec/order.md
 /aicode-test-design --from docs/spec/order.md --scope frontend
 /aicode-test-design "用户可以创建订单，库存不足时失败"
 
-# 视图B（全量自动化资产 → 输出 YAML + Scenario + 质量报告，另附 .xlsx）
-/aicode-test-design --from docs/spec/order.md --mode full
-/aicode-test-design --from docs/spec/order.md --mode full --scope fullstack
+# 视图B（全量自动化资产 → 需要需求文档 + Plan）
+/aicode-test-design --from docs/spec/order.md --plan docs/plan/order.md --mode full
+/aicode-test-design --from docs/spec/order.md --plan docs/plan/order.md --mode full --scope fullstack
 ```
 
 ---
 
-## 步骤 0：判断模式和范围
+## 输入源优先级与交叉校验
 
-**模式判断：**
-- 用户加了 `--mode full` → **走视图B**（步骤 B1-B6）
-- 用户只说了"生成测试用例" → **走视图A**（步骤 A1-A4）
-- Loop TEST_DESIGN 阶段调起 → **走视图B**
+test-design 不依赖单一来源，而是建立 **优先级分层 + 交叉校验**：
 
-**范围判断（`--scope`）：**
+```
+              需求文档/PRD/Spec  (WHAT — 业务要什么，最高权威)
+                     │
+                     ▼
+              Plan               (HOW — 接口契约)
+                     │
+                     ▼
+              代码库             (现有模式参考)
+                     │
+                     ▼
+              AI 推断            (最低信任，必须标注)
+```
+
+### 两个视图对输入的要求不同
+
+```
+视图A（人读 Excel）                   视图B（机跑 Scenario YAML）
+目标: 人看"应该测什么"                目标: 机器能直接跑
+
+只需要业务语义 →                       需要业务语义 + 具体接口契约 →
+  有 PRD/Spec 就够                       需要 PRD/Spec + Plan 两者
+  不需要 Plan                            缺一不可
+```
+
+**为什么？** 视图A 的 Excel 用业务语言（"验证创建订单时库存扣减"），不写 API 路径、SQL、选择器。视图B 的 Scenario YAML 必须写 `POST /api/v1/orders`、`SELECT stock FROM inventory`，这些具体信息只有 Plan 才能提供。
+
+### 输入矩阵
+
+| 用户手里有什么 | 视图A（只出 Excel） | 视图B（出 YAML + Scenario） |
+|---------------|--------------------|-----------------------------|
+| PRD + Plan | 直接出 Excel | **最优**: PRD 给业务锚点 + Plan 给接口契约，交叉校验 |
+| Spec + Plan | 直接出 Excel | Spec 替代 PRD，业务规则 + 接口契约都齐全 |
+| 只有 PRD | 可用 | **降级**: 接口路径 AI 推断，标记 `inferred`，建议先走 `/aicode-plan` |
+| 只有 Spec | 可用 | **降级**: 同上 |
+| 只有 Plan | 不合理（Plan 不管业务规则） | **降级**: 业务规则 AI 反向推断，风险高，标记 `inferred` |
+| 一句话 | 先澄清 → 等价于有 PRD | **阻断**: 提示"请先 `/aicode-spec` → `/aicode-plan`" |
+| 什么都没有 | 提醒用户提供需求 | **阻断** |
+
+### 交叉校验规则（视图B 必须执行）
+
+YAML 中每条用例的 `steps[].config`（接口路径/参数）来自 Plan，`expected.data_assertions` 中的业务断言来自 Spec/PRD。两者必须交叉校验：
+
+```
+每条用例生成时:
+  ├─ 业务语义     ← 必须来自 Spec/PRD（不可编造）
+  ├─ 接口路径     ← 优先用 Plan，无 Plan 标记 inferred_source: ai
+  ├─ 数据断言     ← 业务规则(需求) + 数据变化(Plan) 交叉验证
+  └─ 冲突检测:
+       Plan 的接口路径 ↔ Spec 的验收条件 是否一致？
+       不一致 → 标注 "Plan-Spec 冲突"，写入 open_questions，不自动选一边
+```
+
+---
+
+## 步骤 0：判断模式、输入和范围
+
+### 决策树
+
+```
+用户触发 /aicode-test-design
+  │
+  ├─ 用户加了 --mode full（要自动化资产 → 视图B）
+  │   │
+  │   ├─ 用户有 Spec/PRD？
+  │   │   ├─ YES + 有 Plan → ✅ 最优路径，交叉校验生成
+  │   │   ├─ YES + 无 Plan → ⚠️ 降级: "接口路径靠推断，建议先 /aicode-plan。继续？"
+  │   │   │                   用户坚持 → 大量标记 inferred_source: ai
+  │   │   └─ NO → ❌ 阻断: "需要需求文档。请先 /aicode-spec 或把 PRD 放到 .ai/prd/"
+  │   │
+  │   └─ 用户没有 --mode full（默认视图A）
+  │       │
+  │       ├─ 有 Spec/PRD → ✅ 直接出 Excel
+  │       ├─ 一句话 → ⚠️ 先澄清关键业务规则，再出 Excel
+  │       └─ 什么都没有 → ❌ 提醒用户提供需求
+```
+
+**Loop TEST_DESIGN 阶段调起 → 走视图B。**
+
+### Plan 发现（视图B 需要）
+
+1. 用户 `--plan` 指定 → 直接使用
+2. `docs/plan/` 下同名 feature 的 plan 文件
+3. `.ai/plan/` 下查找
+4. 都没有 → 触发降级逻辑（标记 `inferred_source: ai`，提醒用户）
+
+### 范围判断（`--scope`）
 
 | scope | 默认场景 | Step Action 形态 | 断言形态 | 自动化建议 |
 |-------|----------|-----------------|----------|-----------|
@@ -57,7 +139,7 @@ description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope b
 | `frontend` | UI 交互/页面/组件 | ui_navigate, ui_click, ui_fill, ui_select, ui_hover, ui_wait | DOM 断言(dom_visible/dom_text/dom_value/dom_attribute/dom_count/dom_hidden) | playwright / cypress |
 | `fullstack` | 用户路径贯穿前后端 | ui_click/等 + api_call + db_query | DOM 断言 + HTTP 断言 + data_assertions | playwright |
 
-**用户没有指定 scope 时，默认 backend。** Loop 集成时，由 Intake 阶段分析结果或用户配置决定。
+**用户没有指定 scope 时，默认 backend。**
 
 ---
 
@@ -155,11 +237,35 @@ Excel 结构：
 
 ## 视图B：全量模式
 
-### 步骤 B1：确认需求来源
+### 步骤 B1：确认需求来源 + Plan
 
-同 A1。
+**双源确认：**
 
-### 步骤 B2：AI 生成结构化 YAML
+1. **需求来源**（同 A1）:
+   - `--from` 指定 → Read
+   - `.ai/prd/` 或 `docs/spec/` 下查找
+   - 都没有 → 阻断（视图B 必须有需求）
+
+2. **Plan 来源**（视图B 必需）:
+   - `--plan` 指定 → Read
+   - `docs/plan/` 下同名 feature 的 plan 文件
+   - `.ai/plan/` 下查找
+   - 都没有 → **触发降级**（见步骤 0 决策树），所有接口路径/数据变化标记 `inferred_source: ai`
+
+### 步骤 B2：AI 生成结构化 YAML（含交叉校验）
+
+**在组装每条用例时执行交叉校验**（详见"输入源优先级与交叉校验"）：
+
+```
+每条 backend/fullstack 用例:
+  ├─ title / preconditions / 业务断言 → 来自 Spec/PRD
+  ├─ steps[api_call].config {method, path, body} → 来自 Plan
+  ├─ steps[db_query].config {query} → 来自 Plan 声明的数据变化
+  ├─ expected.data_assertions → 业务规则(需求) + 数据变化(Plan) 交叉验证
+  └─ 字段级标注:
+       inferred_source: spec | plan | codebase | ai   ← 每条断言/接口标注来源
+       若 Spec 验收条件与 Plan 接口路径不一致 → 写入 open_questions
+```
 
 按以下 Schema 生成。**注意：steps 必须是 Action Pipeline 结构化数组，不能是纯文本列表。**
 
@@ -168,8 +274,12 @@ version: 1
 feature: <feature-name>
 scope: backend  # backend | frontend | fullstack
 source:
-  type: spec
-  path: <来源路径>
+  spec:
+    type: spec   # spec | prd | user_text
+    path: <需求来源路径>
+  plan:
+    path: <Plan 文件路径>   # 无 Plan 时填 null
+    status: full            # full(完整) | degraded(降级-无 Plan)
 
 requirements:
   - id: REQ-001
@@ -178,6 +288,7 @@ requirements:
     risk_level: high
     description: ...
     acceptance_criteria: [...]
+    source: spec   # spec | prd | ai_inferred — 业务规则的来源
 
 test_cases:
   # ── backend 示例 ──
@@ -211,7 +322,7 @@ test_cases:
         description: "调用创建订单接口"
         config:
           method: POST
-          path: /orders
+          path: /orders          # inferred_source: plan
           body:
             sku: SKU-A001
             quantity: 1
@@ -219,12 +330,12 @@ test_cases:
         action: db_query
         description: "查询订单表确认记录写入"
         config:
-          query: "SELECT * FROM orders WHERE sku = 'SKU-A001'"
+          query: "SELECT * FROM orders WHERE sku = 'SKU-A001'"  # inferred_source: plan
       - seq: 3
         action: db_query
         description: "查询库存表确认扣减"
         config:
-          query: "SELECT stock FROM inventory WHERE sku = 'SKU-A001'"
+          query: "SELECT stock FROM inventory WHERE sku = 'SKU-A001'"  # inferred_source: plan
     expected:
       response:
         status: 200
@@ -236,11 +347,13 @@ test_cases:
           operator: exists
           expected: {sku: SKU-A001, status: CREATED}
           message: "订单表存在已创建状态的记录"
+          inferred_source: plan     # 数据变化来自 Plan 声明
         - type: mysql
           target: inventory
           operator: eq
           expected: {stock: 9}
           message: "库存从 10 扣减至 9"
+          inferred_source: spec     # "库存要减"来自 Spec 业务规则
       dom_assertions: []
     cleanup:
       required: true
@@ -355,7 +468,7 @@ test_cases:
         action: ui_navigate
         description: "打开订单创建页"
         config:
-          page: /orders/create
+          page: /orders/create     # inferred_source: plan
       - seq: 2
         action: ui_fill
         description: "填写表单"
@@ -373,17 +486,17 @@ test_cases:
         description: "验证创建订单 API 返回"
         config:
           method: POST
-          path: /orders
+          path: /orders            # inferred_source: plan
       - seq: 5
         action: db_query
         description: "查询 orders 表确认记录写入"
         config:
-          query: "SELECT * FROM orders WHERE sku = 'SKU-A001'"
+          query: "SELECT * FROM orders WHERE sku = 'SKU-A001'"  # inferred_source: plan
       - seq: 6
         action: db_query
         description: "查询 inventory 表确认库存变化"
         config:
-          query: "SELECT stock FROM inventory WHERE sku = 'SKU-A001'"
+          query: "SELECT stock FROM inventory WHERE sku = 'SKU-A001'"  # inferred_source: plan
     expected:
       response:
         status: 200
@@ -394,11 +507,13 @@ test_cases:
           operator: exists
           expected: {sku: SKU-A001, status: CREATED}
           message: "订单表存在已创建状态的记录"
+          inferred_source: plan
         - type: mysql
           target: inventory
           operator: eq
           expected: {stock: 9}
           message: "库存从 10 扣减至 9"
+          inferred_source: spec
       dom_assertions:
         - type: dom_visible
           target: '.toast-success'
@@ -616,6 +731,9 @@ AI: 测试设计完成。
 
 ### 流程规则
 - **默认视图A + scope=backend** — 除非用户明确指定
+- **视图A 只需需求文档** — 有 PRD/Spec/一句话(澄清后) 即可
+- **视图B 需要需求文档 + Plan** — 缺一不可，无 Plan 触发降级（标记 `inferred_source: ai`）
+- **视图B 必须交叉校验** — 每条用例的业务语义对 Spec，接口路径对 Plan，不一致写 open_questions
 - **视图A HUMAN_CONFIRM** — 有 open_questions 时先澄清再生成 Excel
 - **视图B HUMAN_CONFIRM** — YAML 中 open_questions 非空时先澄清再调 Python
 - **视图B 硬阻断** — quality.passed=false 时禁止写文件，必须先修复
@@ -626,6 +744,8 @@ AI: 测试设计完成。
 
 ### 内容规则
 - **不编造业务规则** — 不确定的写入 open_questions
+- **接口/断言标注来源** — 视图B 中每条 config（path/query）和 data_assertion 标注 `inferred_source: spec|plan|codebase|ai`
+- **无 Plan 降级标注** — 接口路径/数据变化靠 AI 推断时，必须在用例 `notes` 中注明
 - **人读 vs 机读分离** — `description` 用业务语言（给 Excel），`config` 放技术参数（给机器）。详见 Action Pipeline 对照表
 - **scope 决定 StepAction 和 Assertion 形态** — frontend 用 ui_* + dom_*，backend 用 api_call/db_query + data_assertions
 - **涉及数据变化必须有 data_assertions**（backend/fullstack）

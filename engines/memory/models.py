@@ -40,6 +40,11 @@ class MemoryEntry(BaseModel):
     """单条持久化记忆。
 
     memory.md 索引行只放摘要；完整正文存 entries/{id}.md。
+
+    3 段式结构（格式校验强制要求）：
+    - trigger_conditions: 触发条件（何时相关）
+    - error_pattern: 错误模式（发生了什么）
+    - fix_rule: 修复规则（具体怎么做）
     """
 
     id: str = Field(description="唯一标识，如 rule-001, pitfall-003")
@@ -54,8 +59,22 @@ class MemoryEntry(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
+    # ── 3 段式字段 ──────────────────────────────────────
+    trigger_conditions: str = Field(default="", description="触发条件：什么场景下这条记忆相关")
+    error_pattern: str = Field(default="", description="错误模式：踩了什么坑、发生了什么")
+    fix_rule: str = Field(default="", description="修复规则：必须/禁止/检查/确保 做什么")
+
+    # ── 关系图谱 ────────────────────────────────────────
+    relates_to: list[str] = Field(default_factory=list, description="关联记忆 ID（双向）")
+    caused_by: list[str] = Field(default_factory=list, description="由哪些记忆导致（因果）")
+    fixed_by: list[str] = Field(default_factory=list, description="通过哪些记忆修复")
+
+    # ── 效果追踪 ────────────────────────────────────────
+    effective_count: int = Field(default=0, description="有效次数（修复规则被应用且通过验证）")
+    ineffective_count: int = Field(default=0, description="无效次数（本该应用但被忽略，验证失败）")
+
     def summary_line(self) -> str:
-        """生成索引行，写入 memory.md。"""
+        """生成索引行，写入 memory.md。只放摘要，不放元数据。"""
         conf = self.confidence.value
         tags_str = ",".join(self.tags) if self.tags else ""
         return f"- [{self.id}] {self.title} `[{conf}]` `[{tags_str}]`"
@@ -64,6 +83,23 @@ class MemoryEntry(BaseModel):
         """记录一次召回命中。"""
         self.hit_count += 1
         self.last_hit_at = datetime.now()
+
+    def record_effective(self) -> None:
+        """记录一次有效应用。"""
+        self.effective_count += 1
+
+    def record_ineffective(self) -> None:
+        """记录一次无效（被忽略）。"""
+        self.ineffective_count += 1
+
+    @property
+    def is_3segment_valid(self) -> bool:
+        """3 段式格式校验：每段至少 20 字符。"""
+        return (
+            len(self.trigger_conditions.strip()) >= 20
+            and len(self.error_pattern.strip()) >= 20
+            and len(self.fix_rule.strip()) >= 20
+        )
 
 
 class SessionMemory(BaseModel):

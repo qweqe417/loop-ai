@@ -129,17 +129,22 @@ def main() -> int:
     p_verify.add_argument("--format", default="json")
     p_verify.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
 
-    # ── guard ────────────────────────────────────
-    p_guard = sub.add_parser("guard", help="Guard 检查")
-    p_guard.add_argument("action", nargs="?", default="check", choices=["check", "report"])
-    p_guard.add_argument("--diff", default="HEAD")
-    p_guard.add_argument("--format", default="json")
-    p_guard.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
+    # ── review ────────────────────────────────────
+    p_review = sub.add_parser("review", help="Review 审查检查")
+    p_review.add_argument("action", nargs="?", default="check", choices=["check", "report"])
+    p_review.add_argument("--diff", default="HEAD")
+    p_review.add_argument("--format", default="json")
+    p_review.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
 
     # ── memory ───────────────────────────────────
     p_mem = sub.add_parser("memory", help="记忆管理")
-    p_mem.add_argument("action", nargs="?", default="update", choices=["update", "search", "stats"])
+    p_mem.add_argument("action", nargs="?", default="list",
+                      choices=["list", "confirm", "deprecate", "cleanup", "search", "stats", "recall", "update"])
+    p_mem.add_argument("--id", default="", help="记忆 ID（confirm/deprecate 时使用）")
     p_mem.add_argument("--keyword", default="")
+    p_mem.add_argument("--keywords", default="", help="recall 关键词，逗号分隔")
+    p_mem.add_argument("--stage", default="", help="recall 阶段")
+    p_mem.add_argument("--limit", type=int, default=5, help="recall 返回上限")
     p_mem.add_argument("--format", default="json")
     p_mem.add_argument("--target", default="", help="目标 AI 工具，默认自动检测")
     p_mem.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
@@ -159,6 +164,8 @@ def main() -> int:
                       choices=["generate", "process", "export-xlsx"])
     p_td.add_argument("--from", dest="from_path", default="",
                       help="需求文档路径")
+    p_td.add_argument("--plan", dest="plan_path", default="",
+                      help="Plan 文件路径（视图B 使用，接口契约来源）")
     p_td.add_argument("--feature", default="",
                       help="特性名称")
     p_td.add_argument("--mode", default="human",
@@ -208,8 +215,8 @@ def _dispatch(args: argparse.Namespace) -> dict:
         return _cmd_loop(args)
     elif args.command == "verify":
         return _cmd_verify(args)
-    elif args.command == "guard":
-        return _cmd_guard(args)
+    elif args.command == "review":
+        return _cmd_review(args)
     elif args.command == "memory":
         return _cmd_memory(args)
     elif args.command == "context":
@@ -453,25 +460,31 @@ def _cmd_verify(args: argparse.Namespace) -> dict:
     return {"success": True, "message": "No scenario specified. Run: aicode verify --scenario <id>"}
 
 
-# ── guard ────────────────────────────────────────
+# ── review ────────────────────────────────────────
 
-def _cmd_guard(args: argparse.Namespace) -> dict:
-    from engines.guard import create_guard
+def _cmd_review(args: argparse.Namespace) -> dict:
+    from engines.review import create_review_engine
     from engines.state.models import RunState
 
-    guard = create_guard()
-    # Guard.check() 需要 RunState 参数，创建一个最小 state
+    review = create_review_engine()
     state = RunState(
-        task_id=f"cli-guard-{int(time.time())}",
-        project="guard-check",
+        task_id=f"cli-review-{int(time.time())}",
+        project="review-check",
     )
-    result = guard.check(state)
+    result = review.check(state)
+
+    # 从 details 提取 violations 和 warnings
+    results = result.details.get("results", [])
+    violations = [r for r in results if not r.get("passed")]
+    warnings = [r for r in results if r.get("severity") == "warn"]
     return {
-        "success": not getattr(result, "block", False),
-        "severity": str(getattr(result, "severity", "WARN")),
-        "violations": getattr(result, "violations", []),
-        "warnings": getattr(result, "warnings", []),
-        "reason": getattr(result, "reason", ""),
+        "success": not result.block,
+        "severity": result.severity.value,
+        "blocked": result.block,
+        "violations": violations,
+        "warnings": warnings,
+        "reason": result.reason,
+        "details": result.details,
     }
 
 
@@ -479,14 +492,70 @@ def _cmd_guard(args: argparse.Namespace) -> dict:
 
 def _cmd_memory(args: argparse.Namespace) -> dict:
     from engines.memory import MemoryStore
+    from engines.memory.projection import MemoryProjection
 
     project_root = Path(args.project_root) if getattr(args, "project_root", "") else Path.cwd()
     store = MemoryStore(project_root=project_root)
+    store.load_index()
 
-    if args.action == "search":
+    # ── list: 列出所有记忆（按状态分组）──
+    if args.action == "list":
+        entries = store.load_index() or store.load()
+        drafts = [e for e in entries if e.confidence.value == "draft"]
+        confirmed = [e for e in entries if e.confidence.value == "confirmed"]
+        deprecated = [e for e in entries if e.confidence.value == "deprecated"]
+        return {
+            "success": True,
+            "total": len(entries),
+            "draft": [{"id": e.id, "title": e.title, "tags": e.tags,
+                       "eff": f"{e.effective_count}/{e.ineffective_count}"} for e in drafts],
+            "confirmed": [{"id": e.id, "title": e.title, "tags": e.tags,
+                           "eff": f"{e.effective_count}/{e.ineffective_count}"} for e in confirmed],
+            "deprecated": [{"id": e.id, "title": e.title} for e in deprecated],
+        }
+
+    # ── confirm: 确认 draft → confirmed ──
+    elif args.action == "confirm":
+        entry_id = getattr(args, "id", "")
+        if not entry_id:
+            return {"success": False, "error": "需要指定 --id"}
+        ok = store.promote(entry_id)
+        if ok:
+            return {"success": True, "message": f"已确认 {entry_id} (draft→confirmed)"}
+        return {"success": False, "error": f"未找到或无法确认: {entry_id}"}
+
+    # ── deprecate: 废弃记忆 ──
+    elif args.action == "deprecate":
+        entry_id = getattr(args, "id", "")
+        if not entry_id:
+            return {"success": False, "error": "需要指定 --id"}
+        ok = store.deprecate(entry_id)
+        if ok:
+            return {"success": True, "message": f"已废弃 {entry_id}"}
+        return {"success": False, "error": f"未找到: {entry_id}"}
+
+    # ── cleanup: 清理过期上下文文件 + 淘汰过期 draft ──
+    elif args.action == "cleanup":
+        cleaned_context = 0
+        context_dir = project_root / ".ai" / "memory" / "context"
+        if context_dir.is_dir():
+            # 保留最近 5 个，删其余
+            files = sorted(context_dir.glob("*-memory.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+            for f in files[5:]:
+                f.unlink()
+                cleaned_context += 1
+
+        stale = store.evict_stale_drafts()
+        return {
+            "success": True,
+            "cleaned_context_files": cleaned_context,
+            "evicted_stale_drafts": stale,
+        }
+
+    elif args.action == "search":
         keyword = args.keyword
         if keyword:
-            entries = store.find(tags=[keyword]) if keyword else []
+            entries = store.find(tags=[keyword])
         else:
             entries = store.load()
         return {
@@ -498,10 +567,6 @@ def _cmd_memory(args: argparse.Namespace) -> dict:
     elif args.action == "stats":
         stats = store.stats()
         return {"success": True, "stats": stats.model_dump()}
-
-    elif args.action == "governance":
-        gov = store.governance()
-        return {"success": True, "governance": gov.model_dump()}
 
     elif args.action == "recall":
         keywords = args.keywords.split(",") if getattr(args, "keywords", "") else []
@@ -515,7 +580,6 @@ def _cmd_memory(args: argparse.Namespace) -> dict:
         }
 
     # update: regenerate projections
-    from engines.memory.projection import MemoryProjection
     proj = MemoryProjection(store)
     results = proj.sync_all()
     return {
@@ -575,16 +639,19 @@ def _cmd_test_design(args: argparse.Namespace) -> dict:
 
 def _cmd_td_generate(args: argparse.Namespace) -> dict:
     project_root = Path(args.project_root) if getattr(args, "project_root", "") else Path.cwd()
+    plan_path = getattr(args, "plan_path", "") or ""
     return {
         "success": True,
         "action": "generate",
         "mode": args.mode,
         "scope": args.scope,
         "from_path": getattr(args, "from_path", "") or "",
+        "plan_path": plan_path,
         "project_root": str(project_root),
         "hint": (
-            "视图A (human): AI 读需求 → 调 Skill: example-skills:xlsx 生成 测试用例.xlsx。"
-            "视图B (full): AI 按 Schema 生成 YAML → 调 test-design process 一键校验+门禁+映射。"
+            "视图A (human): AI 读需求 → 生成 测试用例.xlsx（只需需求文档）。"
+            "视图B (full): 需求文档 + Plan 交叉校验 → AI 按 Schema 生成 YAML → 调 test-design process 一键校验+门禁+映射。"
+            f"Plan 来源: {'已指定 ' + plan_path if plan_path else '未指定，将自动查找或降级标记 inferred_source=ai'}。"
         ),
     }
 

@@ -22,37 +22,38 @@ logger = logging.getLogger(__name__)
 # 每个阶段完成后默认进入的下一个阶段（handler 可通过 decision 覆盖）
 DEFAULT_FLOW: dict[StageType, StageType | None] = {
     StageType.INTAKE:         StageType.SPEC,
-    StageType.SPEC:           StageType.TEST_DESIGN,
-    StageType.TEST_DESIGN:    StageType.PLAN,
-    StageType.PLAN:           StageType.EXECUTE,
-    StageType.EXECUTE:        StageType.VERIFY,
-    StageType.VERIFY:         StageType.REVIEW,
-    StageType.REPAIR:         StageType.VERIFY,
-    StageType.REVIEW:         StageType.MEMORY,
+    StageType.SPEC:           StageType.PLAN,
+    StageType.PLAN:           StageType.TEST_DESIGN,
+    StageType.TEST_DESIGN:    StageType.EXECUTE,
+    StageType.EXECUTE:        StageType.REVIEW,       # 先审查（快速门禁）
+    StageType.REVIEW:         StageType.VERIFY,        # 审查通过 → 场景验证（可 override 跳 MEMORY）
+    StageType.VERIFY:         StageType.MEMORY,        # 验证通过 → 沉淀记忆
+    StageType.REPAIR:         StageType.REVIEW,        # 修复后 → 回审查再过门禁再验证
     StageType.MEMORY:         StageType.COMPLETED,
-    StageType.DIRECT_EXECUTE: StageType.VERIFY,
+    StageType.DIRECT_EXECUTE: StageType.REVIEW,        # Direct 也先过审查
     StageType.COMPLETED:      None,
     StageType.ABORTED:        None,
 }
 
-# 完整标准流程（Direct Mode 除外）
+# 完整标准流程：INTAKE → SPEC → PLAN → TEST_DESIGN → EXECUTE → REVIEW → VERIFY → MEMORY
+# REVIEW 在 VERIFY 之前：先快速门禁（Python规则），通过后再跑场景测试
 STANDARD_STAGES: list[StageType] = [
     StageType.INTAKE,
     StageType.SPEC,
-    StageType.TEST_DESIGN,
     StageType.PLAN,
+    StageType.TEST_DESIGN,
     StageType.EXECUTE,
-    StageType.VERIFY,
     StageType.REVIEW,
+    StageType.VERIFY,
     StageType.MEMORY,
 ]
 
-# Direct Mode 跳过 SPEC/PLAN，可选跳过 VERIFY
+# Direct Mode 跳过 SPEC/PLAN/TEST_DESIGN
 DIRECT_STAGES: list[StageType] = [
     StageType.INTAKE,
     StageType.DIRECT_EXECUTE,
-    StageType.VERIFY,
     StageType.REVIEW,
+    StageType.VERIFY,
 ]
 
 
@@ -373,7 +374,7 @@ class TestDesignStageHandler(StageHandler):
         state.task_state.notes.append(
             "[TEST_DESIGN] 由 AI skill 处理 (/aicode-test-design)，Python 侧透传"
         )
-        logger.info("TestDesignStageHandler: pass-through to PLAN")
+        logger.info("TestDesignStageHandler: pass-through to EXECUTE")
 
         # 如果已经有 test_design_bundle（从 AI 提交的 continue 恢复），直接流转
         if state.test_design_bundle:
@@ -544,70 +545,38 @@ class ExecuteHandler(StageHandler):
         preflight = self._load_preflight_warnings(state)
         specification = self._load_specification(state, task_id=task_id)
 
-        # ── 构造 superpowers:subagent-driven-development 指令 ──
-        # 控制器 (你) 负责: 读 Plan/Spec → 为子Agent 组装上下文 → 派发 → 审阅 → 提交
+        # ── 构造执行指令 ──
         plan_ref = specification.get("plan_path", "docs/plan/*.md")
         spec_ref = specification.get("spec_path", "docs/spec/*.md")
         position_info = f"{idx + 1}/{total}"
-        depends_str = ", ".join(
-            state.plan_contracts[idx - 1].get("task_id", "") for _ in [0] if idx > 0
-        ) if idx > 0 else "无"
-        requires_str = ", ".join(
-            state.plan_contracts[idx + 1].get("task_id", "") for _ in [0] if idx + 1 < total
-        ) if idx + 1 < total else "无"
+        depends_str = state.plan_contracts[idx - 1].get("task_id", "") if idx > 0 else "无"
+        requires_str = state.plan_contracts[idx + 1].get("task_id", "") if idx + 1 < total else "无"
 
-        instruction_parts = [
-            f"## Task {task_id} ({position_info}): {contract.get('goal', contract.get('title', ''))}",
-            "",
-            "## 执行模式: superpowers:subagent-driven-development",
-            "",
-            "使用 `Skill: superpowers:subagent-driven-development` 执行此 Task。",
-            "**重要: 只执行这一个 Task，不要执行 Plan 中的其他 Task。Python 循环会逐个派发。**",
-            "你作为**控制器**，负责为每个子Agent 组装精准上下文、派发、审阅。",
-            "",
-            "### 你作为控制器的职责",
-            "",
-            f"**1. 读取上下文:**",
-            f"  - Plan 文件: {plan_ref}",
-            f"  - Spec 文件: {spec_ref}",
-            f"  - 相关代码: ContextRouter 已加载，见 `context` 字段",
-            "",
-            "**2. 为实现子Agent 组装 prompt:**",
-        ]
-        # Task 内容摘要 — 供 AI 填入子Agent prompt
         task_summary = contract.get("goal", contract.get("title", ""))
         allowed = contract.get("allowed_files", [])
         forbidden = contract.get("forbidden_files", [])
         budget = contract.get("budget", {})
-        instruction_parts.extend([
-            f"  - Task 目标: {task_summary}",
-            f"  - 修改文件: {allowed}",
-            f"  - 禁止修改: {forbidden}",
-            f"  - 文件数上限: {budget.get('max_files', 3)}",
-            f"  - 行数上限: {budget.get('max_lines', 100)}",
-            f"  - 允许新抽象: {budget.get('allow_new_abstractions', False)}",
-            f"  - 允许新依赖: {budget.get('allow_new_dependencies', False)}",
-            f"  - 位置: 第 {position_info} 个 / 共 {total} 个 Task",
-            f"  - 前置依赖: {depends_str}",
-            f"  - 被依赖: {requires_str}",
-        ])
+
+        instruction_parts = [
+            f"Task {task_id} ({position_info}): {task_summary}",
+            "",
+            f"修改文件: {allowed}",
+            f"禁止修改: {forbidden}",
+            f"上限: {budget.get('max_files', 3)} files / {budget.get('max_lines', 100)} lines",
+            f"新抽象: {budget.get('allow_new_abstractions', False)} | 新依赖: {budget.get('allow_new_dependencies', False)}",
+            f"依赖: {depends_str} | 被依赖: {requires_str}",
+            "",
+            f"Plan: {plan_ref} | Spec: {spec_ref}",
+            "上下文: 见 `context` 字段 (ContextRouter 已组装)",
+            f"记忆: .ai/memory/context/{task_id}-memory.md",
+        ]
         if preflight:
             instruction_parts.extend([
                 "",
-                "**3. 注入子Agent 警告:**",
+                "⚠ 项目记忆警告:",
                 *[f"  - {w}" for w in preflight],
             ])
-        instruction_parts.extend([
-            "",
-            "**4. 派发审查子Agent:**",
-            "  - Spec 合规审查: 对照 Spec 逐条验证代码（独立子Agent，不信任实现者报告）",
-            "  - 代码质量审查: 检查风格/复用/性能（独立子Agent）",
-            "  - 有问题 → 实现者修复 → 再审 → 直到通过",
-            "",
-            "**5. 提交结果:**",
-            "  按 `submission_format` 结构提交变更摘要 JSON。",
-            f"  整体目标背景: {state.task_intake.reason[:120] if state.task_intake else task_summary}",
-        ])
+        instruction_parts.append("")
 
         state.pending_action = "execute_task"
         state.pending_prompt = {
@@ -1006,33 +975,27 @@ class ExecuteHandler(StageHandler):
             return None
 
     def _pre_guard_check(self, state: RunState) -> bool:
-        """Guard 前置检查。"""
+        """审查前置检查 —— 在 AI 编码前运行默认规则集。"""
         try:
-            from engines.guard.engine import Guard
-            from engines.guard.rules import ScopeBoundaryRule, RiskLevelRule, SanityCheckRule
+            from engines.review import create_review_engine
 
-            guard = Guard()
-            guard.add_rule(ScopeBoundaryRule())
-            guard.add_rule(RiskLevelRule())
-            guard.add_rule(SanityCheckRule())
-
-            result = guard.check(state)
+            review = create_review_engine()
+            result = review.check(state)
             if result.block:
-                state.task_state.notes.append(f"[EXECUTE] Guard 拦截: {result.reason}")
-                state.decision = None  # force stop
+                state.task_state.notes.append(f"[EXECUTE] Review 拦截: {result.reason}")
+                state.decision = None
                 return False
 
             individual_results = result.details.get("results", [])
             passed = sum(1 for r in individual_results if getattr(r, 'passed', True))
             state.task_state.notes.append(
-                f"[EXECUTE] Guard: {passed}/{len(individual_results)} passed"
+                f"[EXECUTE] Review: {passed}/{len(individual_results)} passed"
             )
             return True
         except Exception as exc:
-            # P2 fix: Guard 异常时阻止执行 (fail-safe)，不静默跳过
             logger.error("Guard check raised exception, BLOCKING: %s", exc)
             state.task_state.notes.append(
-                f"[EXECUTE] Guard 异常，阻止执行: {type(exc).__name__}: {exc}"
+                f"[EXECUTE] Review 异常，阻止执行: {type(exc).__name__}: {exc}"
             )
             return False
 
@@ -1041,6 +1004,9 @@ class ExecuteHandler(StageHandler):
 
         上下文预算感知: 加载前检查预算，加载后跟踪使用量。
         返回渲染后的上下文文本，可直接注入 AI prompt。
+
+        同时写入 .ai/memory/context/{task_id}-memory.md（Path A 文件注入），
+        供 superpowers 路径按需读取。不污染规则文件。
         """
         try:
             from engines.context.router import ContextRouter
@@ -1056,18 +1022,86 @@ class ExecuteHandler(StageHandler):
                 state.task_state.notes.append(
                     f"[EXECUTE context] tokens={bundle.total_tokens}, "
                     f"files={len(bundle.pieces)}, "
+                    f"pointers={len(bundle.trimmed_pointers)}, "
                     f"budget={state.context_budget_used}/{state.context_budget_max}"
                 )
-                # 如果 bundle 被截断，记录
                 if bundle.trimmed:
                     state.task_state.notes.append(
-                        f"[EXECUTE context] Context 已截断 (trimmed={bundle.trimmed})"
+                        f"[EXECUTE context] Context 已截断 (trimmed={bundle.trimmed}, "
+                        f"pointers={len(bundle.trimmed_pointers)})"
                     )
+
+                # ── 记录注入的记忆 ID（供 VERIFY 阶段效果评估）──
+                injected_ids = [
+                    p.path for p in bundle.pieces
+                    if p.source == "memory" and p.path
+                ]
+                if injected_ids:
+                    existing = state.metadata.get("injected_memory_ids", [])
+                    state.metadata["injected_memory_ids"] = list(dict.fromkeys(existing + injected_ids))
+
+                # ── Path A 文件注入 ──
+                task_id = contract.get("task_id", state.task_id)
+                context_file = self._inject_context_file(bundle, task_id, state.project_root)
+                if context_file:
+                    state.task_state.notes.append(
+                        f"[EXECUTE context] 记忆上下文文件已写入 {context_file}"
+                    )
+
                 return bundle.render()
             return ""
         except Exception as exc:
             logger.warning("ContextRouter failed for EXECUTE: %s", exc)
             return ""
+
+    def _inject_context_file(
+        self, bundle, task_id: str, project_root: str
+    ) -> str | None:
+        """Path A 文件注入: 将记忆和 pointer 写入独立文件。
+
+        不污染 CLAUDE.md / rules/*.md。
+        文件路径: .ai/memory/context/{task_id}-memory.md
+        """
+        from pathlib import Path
+        try:
+            context_dir = Path(project_root) / ".ai" / "memory" / "context"
+            context_dir.mkdir(parents=True, exist_ok=True)
+
+            filepath = context_dir / f"{task_id}-memory.md"
+
+            lines = [
+                f"# 任务上下文 — {task_id}",
+                "",
+                "> 此文件由 Loop Runtime 自动生成。可按需读取，不强制加载。",
+                "",
+            ]
+
+            # 记忆条目摘要
+            mem_pieces = [p for p in bundle.pieces if p.source == "memory"]
+            if mem_pieces:
+                lines.append("## 相关项目记忆")
+                lines.append("")
+                for mp in mem_pieces:
+                    lines.append(f"- {mp.content}")
+                lines.append("")
+
+            # 被裁剪的 pointers
+            if bundle.trimmed_pointers:
+                lines.append("## 可回捞内容（被裁剪）")
+                lines.append("")
+                for tp in bundle.trimmed_pointers:
+                    lines.append(f"- **[{tp.type}]** {tp.summary}")
+                    if tp.why_relevant:
+                        lines.append(f"  - 关联: {tp.why_relevant}")
+                    if tp.retrieval_hint:
+                        lines.append(f"  - 回捞: `{tp.retrieval_hint}`")
+                lines.append("")
+
+            filepath.write_text("\n".join(lines), encoding="utf-8")
+            return str(filepath)
+        except Exception as exc:
+            logger.warning("Failed to write context file: %s", exc)
+            return None
 
     # ContextRouter 实例缓存（per-handler 复用，避免重复初始化）
     _cached_router = None
@@ -1302,7 +1336,7 @@ class ExecuteHandler(StageHandler):
         try:
             from pathlib import Path
 
-            from engines.guard.quick_check import QuickCheckRunner
+            from engines.validation import QuickCheckRunner
 
             project_root = Path(state.project_root) if state.project_root else Path.cwd()
             runner = QuickCheckRunner(project_root=project_root)
@@ -1434,6 +1468,10 @@ class VerifyHandler(StageHandler):
                 state.task_state.notes.append(
                     f"[VERIFY] {len(failed)} scenarios failed — 进入 REPAIR"
                 )
+
+                # ── 记忆效果评估（失败 = 记忆被忽略）──
+                self._evaluate_memory_effectiveness(state, success=False)
+
                 logger.info("Verification failed: %d scenarios, entering REPAIR", len(failed))
                 return self._advance_to(state, StageType.REPAIR,
                                         f"验证失败 ({len(failed)} scenarios), 进入修复")
@@ -1456,9 +1494,42 @@ class VerifyHandler(StageHandler):
         state.verification.passed_assertions = state.verification.total_assertions
         state.task_state.notes.append("[VERIFY] 全部验证通过")
 
+        # ── 记忆效果自动评估 ──
+        self._evaluate_memory_effectiveness(state, success=True)
+
         logger.info("Verification passed: %d scenarios, %d assertions",
                      len(scenario_results), state.verification.total_assertions)
         return self._complete(state, f"验证通过: {state.verification.summary}")
+
+    def _evaluate_memory_effectiveness(self, state: RunState, success: bool) -> None:
+        """VERIFY 阶段自动评估注入记忆的效果。
+
+        - 验证通过 → 注入的记忆标记 effective（修复规则被正确应用）
+        - 验证失败 → 注入的记忆标记 ineffective（本该用但被忽略）
+        """
+        try:
+            from engines.memory.store import MemoryStore
+            store = MemoryStore(project_root=state.project_root)
+            store.load_index()
+
+            # 从 run_state 获取本任务注入的记忆 ID 列表
+            injected_ids = state.metadata.get("injected_memory_ids", [])
+            if not injected_ids:
+                return
+
+            updated = 0
+            for mem_id in injected_ids:
+                store.record_effectiveness(mem_id, effective=success)
+                updated += 1
+
+            if updated:
+                label = "effective" if success else "ineffective"
+                state.task_state.notes.append(
+                    f"[VERIFY] 记忆效果评估: {updated} 条标记为 {label}"
+                )
+                logger.info("Memory effectiveness: %d entries marked %s", updated, label)
+        except Exception as exc:
+            logger.warning("Memory effectiveness evaluation failed: %s", exc)
 
     @staticmethod
     def _load_sanity_check_items(state: RunState) -> list:
@@ -1713,160 +1784,376 @@ class RepairHandler(StageHandler):
 
 
 class ReviewHandler(StageHandler):
-    """审查处理器 —— Guard + Plan 合规 + Style Contract + Anti-Cheating（架构 §9.6）。
+    """审查处理器 —— 两层审查架构。
 
-    Python 职责:
-      1. Guard 检查（边界/风险等级/ScopeBoundary/RiskLevel）
-      2. Plan 合规检查（forbidden files / allowed only / diff budget）
-      3. Anti-Cheating 检查（TestIntegrity / AssertionWeakening / SkipModification）
-      4. Task Execution Log 汇总
-      5. 输出审查报告
+    Layer 1 (Python): 确定性检测 — SecretScan / TestIntegrity / ScopeBoundary / SkipDetection
+    Layer 2 (AI):   语义审查 — 读 git diff 做深度代码审查
 
-    AI 职责:
-      1. 判断是否需要 Plan Change
-      2. 解释 Anti-Cheating 违规
+    三阶段协议（支持 auto-repair loop）：
+      PREPARE:  运行 Layer1 → 构建 AI review prompt（含 Layer1 结果 + diff + Plan 合约）
+      VALIDATE: AI 提交审查结果 → 有 BLOCK 违规进入 fix 循环(max 3)
+      FIX:      AI 修复后 → 重新运行 Layer1 → 通过则推进，否则回到 VALIDATE
     """
 
     stage = StageType.REVIEW
+    MAX_REVIEW_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
-        logger.info("Review — running guard, compliance, anti-cheating, quality, and rollback checks")
+        logger.info("Review — two-layer review (Layer1 deterministic + Layer2 AI semantic)")
 
-        # 初始化实例级警告收集器
         self._plan_warnings: list[str] = []
-
         state.task_state.stage = StageType.REVIEW
+
+        # 初始化 review_retry 计数
+        review_meta = state.metadata.setdefault("review_meta", {})
+        retry_count = review_meta.get("retry_count", 0)
+
+        # ── Phase FIX: AI 已提交修复 → 重新验证 ──
+        fix_result = state.metadata.get("review_fix_result")
+        if fix_result and isinstance(fix_result, dict):
+            return self._validate_fix(state, fix_result, retry_count)
+
+        # ── Phase VALIDATE: AI 已提交审查结果 ──
+        ai_result = state.metadata.get("review_ai_result")
+        if ai_result and isinstance(ai_result, dict):
+            return self._validate_review(state, ai_result, retry_count)
+
+        # ── Phase PREPARE: 运行 Layer1 + 构建 AI review prompt ──
+        return self._prepare_review(state)
+
+    # ═══════════════════════════════════════════════════════════════
+    # Phase PREPARE
+    # ═══════════════════════════════════════════════════════════════
+
+    def _prepare_review(self, state: RunState) -> RunState:
+        """PREPARE: Layer1 检查 + Plan 合规 + 构建 AI 审查 prompt。"""
         violations: list[str] = []
         warnings: list[str] = []
 
-        # 1. Guard 检查（边界、风险等级）
-        guard_violations, guard_warnings = self._run_guard_checks(state)
-        violations.extend(guard_violations)
-        warnings.extend(guard_warnings)
+        # 1. Layer1: Python 规则检查（跑一次，结果同时用于 violations 列表和 AI prompt）
+        layer1_violations, layer1_warnings, layer1_result = self._run_layer1_checks(state)
+        violations.extend(layer1_violations)
+        warnings.extend(layer1_warnings)
 
-        # 2. Plan 合规检查（逐 Task，详细对比 allowedFiles/forbiddenFiles/diff budget）
+        # 2. Plan 合规检查
         plan_violations = self._check_plan_compliance(state)
         violations.extend(plan_violations)
 
-        # 3. Anti-Cheating 检查
-        ac_violations, ac_warnings = self._run_anti_cheating(state)
-        violations.extend(ac_violations)
-        warnings.extend(ac_warnings)
-
-        # 4. Code Quality Gate / Elegance Review（架构 §8.7.11）
-        quality_violations, quality_warnings = self._run_code_quality_check(state)
-        violations.extend(quality_violations)
-        warnings.extend(quality_warnings)
-
-        # 5. 高风险任务回滚方案生成（架构 §16.4）
-        rollback_plan = self._generate_rollback_if_needed(state)
-        if rollback_plan:
-            state.task_state.notes.append(f"[REVIEW] 回滚方案已生成: {rollback_plan}")
-
-        # 5.5. Schema Version 记录（DDL/migration 变更追踪）
+        # 3. Schema Version 记录
         schema_record = self._record_schema_version(state)
         if schema_record:
             state.task_state.notes.append(f"[REVIEW] Schema 版本已记录: {schema_record}")
 
-        # 6. Task Execution Log 汇总
+        # 4. Task Execution Log 汇总
         task_summary = self._summarize_task_logs(state)
 
-        # 7. 输出审查报告
-        total_issues = len(violations) + len(warnings)
-        if total_issues > 0:
-            state.task_state.notes.append(
-                f"[REVIEW] {len(violations)} violations, {len(warnings)} warnings: "
-                + "; ".join((violations + warnings)[:5])
-            )
-            logger.warning("Review: %d violations, %d warnings", len(violations), len(warnings))
-        else:
-            state.task_state.notes.append("[REVIEW] 审查通过, 无违规")
-            logger.info("Review passed — no violations")
+        # 5. 获取 git diff
+        diff_text = self._get_git_diff(state)
 
-        state.task_state.notes.append(f"[REVIEW] {task_summary}")
+        # 6. 构建 AI 审查 prompt（复用 Layer1 结果，不再重复 check）
+        try:
+            from engines.review.engine import ReviewEngine
 
-        # 记录审查报告到 metadata 供 Memory 使用
+            review_engine = ReviewEngine()
+            if layer1_result is None:
+                layer1_result = review_engine.check(state)
+            ai_prompt = review_engine.build_ai_review_prompt(state, diff_text, layer1_result)
+        except Exception as exc:
+            logger.warning("Failed to build AI review prompt: %s", exc)
+            ai_prompt = self._build_fallback_review_prompt(state, diff_text, violations, warnings)
+
+        # 7. 记录 Layer1 结果
         state.metadata["review_report"] = {
-            "violations": violations,
-            "warnings": warnings,
+            "layer1_violations": violations,
+            "layer1_warnings": warnings,
             "task_summary": task_summary,
-            "rollback_plan": rollback_plan,
         }
+        state.metadata["review_meta"] = {"retry_count": 0, "layer1_blocked": len(violations) > 0}
+
+        # 8. 设置 AI review 请求
+        state.pending_action = "review"
+        state.pending_prompt = {
+            "instruction": ai_prompt,
+            "layer1_violations": violations,
+            "layer1_warnings": warnings,
+        }
+        state.needs_ai_input = True
+
+        state.task_state.notes.append(
+            f"[REVIEW] PREPARE: Layer1 → {len(violations)} violations, "
+            f"{len(warnings)} warnings → AI 深度审查"
+        )
+        logger.info("Review PREPARE: AI review prompt ready (%d chars)", len(ai_prompt))
+        return state
+
+    # ═══════════════════════════════════════════════════════════════
+    # Phase VALIDATE
+    # ═══════════════════════════════════════════════════════════════
+
+    def _validate_review(
+        self, state: RunState, ai_result: dict, retry_count: int
+    ) -> RunState:
+        """VALIDATE: 解析 AI 审查结果 → 决定是否需要修复。"""
+        # 清理 metadata 中的 AI 结果（避免重复处理）
+        state.metadata.pop("review_ai_result", None)
+
+        passed = ai_result.get("passed", True)
+        ai_violations = ai_result.get("violations", [])
+        summary = ai_result.get("summary", "")
+
+        block_violations = [v for v in ai_violations if v.get("severity") == "BLOCK"]
+        warn_violations = [v for v in ai_violations if v.get("severity") == "WARN"]
+
+        state.task_state.notes.append(
+            f"[REVIEW] AI 审查: passed={passed}, "
+            f"BLOCK={len(block_violations)}, WARN={len(warn_violations)}"
+        )
+
+        # 更新 review report
+        report = state.metadata.setdefault("review_report", {})
+        report["ai_passed"] = passed
+        report["ai_violations"] = ai_violations
+        report["ai_summary"] = summary
+
+        if passed and not block_violations:
+            # 审查通过 → 推进到下一阶段
+            state.task_state.notes.append("[REVIEW] AI 审查通过")
+            logger.info("Review passed — advancing to next stage")
+            return self._finish_review(state)
+
+        # 有 BLOCK 违规 → 判断是否需要 AI 修复
+        if block_violations and retry_count < self.MAX_REVIEW_RETRIES:
+            return self._request_fix(state, block_violations, retry_count)
+
+        # 重试次数耗尽 或 仅有 WARN → 记录并推进
+        if retry_count >= self.MAX_REVIEW_RETRIES:
+            state.task_state.notes.append(
+                f"[REVIEW] Auto-fix 重试 {retry_count} 次已达上限，带警告推进"
+            )
+        else:
+            state.task_state.notes.append(
+                f"[REVIEW] {len(warn_violations)} warnings (非阻断)，推进到下一阶段"
+            )
+
+        return self._finish_review(state)
+
+    # ═══════════════════════════════════════════════════════════════
+    # Auto-Fix 循环
+    # ═══════════════════════════════════════════════════════════════
+
+    def _request_fix(
+        self, state: RunState, block_violations: list[dict], retry_count: int
+    ) -> RunState:
+        """构造 AI 修复 prompt，请求 AI 修复 BLOCK 违规。"""
+        new_retry = retry_count + 1
+
+        fix_instruction_parts = [
+            "## 修复代码审查违规",
+            "",
+            f"以下 {len(block_violations)} 个 BLOCK 级别违规需要修复（第 {new_retry}/{self.MAX_REVIEW_RETRIES} 次尝试）：",
+            "",
+        ]
+        for i, v in enumerate(block_violations):
+            file_path = v.get("file", "?")
+            desc = v.get("description", "")
+            suggestion = v.get("fix_suggestion", "")
+            fix_instruction_parts.append(
+                f"{i + 1}. **{file_path}**: {desc}"
+            )
+            if suggestion:
+                fix_instruction_parts.append(f"   修复建议: {suggestion}")
+        fix_instruction_parts.extend([
+            "",
+            "## 修复要求",
+            "- 只修改有违规的文件",
+            "- 每处修改需确保不引入新问题",
+            "- 修复后检查相关测试是否仍然通过",
+            "- 输出 JSON: {\"fixed\": true/false, \"changes\": [{\"file\": \"...\", \"description\": \"...\"}], \"summary\": \"...\"}",
+        ])
+
+        state.pending_action = "review_fix"
+        state.pending_prompt = {
+            "instruction": "\n".join(fix_instruction_parts),
+            "violations": block_violations,
+            "retry": new_retry,
+            "max_retries": self.MAX_REVIEW_RETRIES,
+        }
+        state.needs_ai_input = True
+        state.metadata["review_meta"]["retry_count"] = new_retry
+
+        state.task_state.notes.append(
+            f"[REVIEW] Auto-fix 第 {new_retry}/{self.MAX_REVIEW_RETRIES} 次: "
+            f"修复 {len(block_violations)} 个 BLOCK 违规"
+        )
+        logger.info("Review: requesting AI fix (attempt %d/%d)", new_retry, self.MAX_REVIEW_RETRIES)
+        return state
+
+    def _validate_fix(
+        self, state: RunState, fix_result: dict, retry_count: int
+    ) -> RunState:
+        """验证 AI 修复结果 → 重新运行 Layer1 → 决定是否推进。"""
+        state.metadata.pop("review_fix_result", None)
+
+        fixed = fix_result.get("fixed", False)
+        changes = fix_result.get("changes", [])
+        summary = fix_result.get("summary", "")
+
+        state.task_state.notes.append(
+            f"[REVIEW] FIX 验证: fixed={fixed}, changes={len(changes)}, {summary[:100]}"
+        )
+
+        # 重新运行 Layer1 检查
+        layer1_violations, layer1_warnings, _ = self._run_layer1_checks(state)
+
+        if not layer1_violations:
+            state.task_state.notes.append("[REVIEW] Layer1 重新检查通过，修复成功")
+            logger.info("Review fix validated — Layer1 passed")
+            return self._finish_review(state)
+
+        # Layer1 仍然失败 → 判断是否重试
+        if retry_count < self.MAX_REVIEW_RETRIES:
+            state.task_state.notes.append(
+                f"[REVIEW] Layer1 仍有 {len(layer1_violations)} violations, 继续修复"
+            )
+            # 构造 block_violations 格式以便 _request_fix 使用
+            still_blocked = [
+                {"file": "?", "severity": "BLOCK", "description": v}
+                for v in layer1_violations
+            ]
+            return self._request_fix(state, still_blocked, retry_count)
+
+        # 重试耗尽
+        state.task_state.notes.append(
+            f"[REVIEW] Auto-fix 重试耗尽, Layer1 仍有 {len(layer1_violations)} violations, 带警告推进"
+        )
+        return self._finish_review(state)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 完成
+    # ═══════════════════════════════════════════════════════════════
+
+    def _finish_review(self, state: RunState) -> RunState:
+        """审查完成 —— 清空 pending 状态，推进到下一阶段。"""
+        state.needs_ai_input = False
+        state.pending_action = ""
+        state.pending_prompt = {}
+
+        report = state.metadata.get("review_report", {})
+        violations = report.get("layer1_violations", [])
+        warnings = report.get("layer1_warnings", [])
+        task_summary = report.get("task_summary", "")
+
+        # 判断是否跳过 VERIFY（纯 docs/config 变更）
+        if self._is_docs_only(state):
+            state.task_state.notes.append("[REVIEW] 纯文档/配置变更，跳过 VERIFY → MEMORY")
+            state.metadata["skip_verify"] = True
 
         return self._complete(
             state,
             f"review: {len(violations)} violations, {len(warnings)} warnings, {task_summary}",
         )
 
-    # ── Guard 检查 ────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════
+    # Helpers
+    # ═══════════════════════════════════════════════════════════════
 
-    def _run_guard_checks(self, state: RunState) -> tuple[list[str], list[str]]:
+    def _run_layer1_checks(self, state: RunState) -> tuple[list[str], list[str], object]:
+        """运行 Layer1 检查 —— 使用默认规则集（SecretScan / TestIntegrity / ScopeBoundary / SkipDetection）。
+
+        Returns: (violations, warnings, review_result)
+        """
         violations: list[str] = []
         warnings: list[str] = []
+        layer1_result = None
         try:
-            from engines.guard.engine import Guard
-            from engines.guard.rules import ScopeBoundaryRule, RiskLevelRule, SanityCheckRule
+            from engines.review.engine import ReviewEngine
 
-            guard = Guard()
-            guard.add_rule(ScopeBoundaryRule())
-            guard.add_rule(RiskLevelRule())
-            guard.add_rule(SanityCheckRule())
-
-            result = guard.check(state)
-            individual_results = result.details.get("results", [])
-            passed = sum(1 for r in individual_results if getattr(r, 'passed', True))
+            review = ReviewEngine()
+            layer1_result = review.check(state)
+            individual_results = layer1_result.details.get("results", [])
+            passed_count = sum(1 for r in individual_results if r.get("passed", True))
             state.task_state.notes.append(
-                f"[REVIEW] Guard: {passed}/{len(individual_results)} passed, blocked={result.block}"
+                f"[REVIEW] Layer1: {passed_count}/{len(individual_results)} passed, blocked={layer1_result.block}"
             )
-            if result.block:
-                violations.append(f"Guard blocked: {result.reason}")
+            if layer1_result.block:
+                violations.append(f"Review blocked: {layer1_result.reason}")
             for r in individual_results:
-                if getattr(r, 'severity', None) and str(r.severity) == 'WARN':
-                    warnings.append(f"Guard warn [{getattr(r, 'rule_name', '?')}]: {getattr(r, 'reason', '')}")
+                if r.get("severity") == "warn":
+                    warnings.append(f"Review warn [{r.get('rule', '?')}]: {r.get('reason', '')}")
         except Exception as exc:
-            logger.warning("Guard review check failed: %s", exc)
-            state.task_state.notes.append(f"[REVIEW] Guard 跳过: {exc}")
-        return violations, warnings
+            logger.warning("Review Layer1 check failed: %s", exc)
+            state.task_state.notes.append(f"[REVIEW] Layer1 跳过: {exc}")
+        return violations, warnings, layer1_result
 
-    # ── Anti-Cheating 检查 (架构 §8.7.10 / §16.3) ────────────
-
-    def _run_anti_cheating(self, state: RunState) -> tuple[list[str], list[str]]:
-        """运行反作弊规则：TestIntegrity / AssertionWeakening / SkipModification。"""
-        violations: list[str] = []
-        warnings: list[str] = []
+    def _get_git_diff(self, state: RunState) -> str:
+        """获取 git diff 文本供 AI 审查使用。"""
         try:
-            from engines.guard.engine import Guard
-            from engines.guard.rules import (
-                AssertionWeakeningRule,
-                SkipModificationRule,
-                TestIntegrityRule,
+            import subprocess
+            from pathlib import Path
+
+            project_root = Path(state.project_root) if state.project_root else Path.cwd()
+            if not (project_root / ".git").is_dir():
+                return ""
+            result = subprocess.run(
+                ["git", "diff", "HEAD"],
+                capture_output=True, text=True, cwd=str(project_root), timeout=15,
             )
-
-            guard = Guard()
-            guard.add_rule(TestIntegrityRule())
-            guard.add_rule(AssertionWeakeningRule())
-            guard.add_rule(SkipModificationRule())
-
-            result = guard.check(state)
-            individual_results = result.details.get("results", [])
-            for r in individual_results:
-                rule_name = getattr(r, 'rule_name', '?')
-                if not getattr(r, 'passed', True):
-                    severity = str(getattr(r, 'severity', 'WARN'))
-                    reason = getattr(r, 'reason', '')
-                    if severity == 'BLOCK':
-                        violations.append(f"Anti-Cheating [{rule_name}]: {reason}")
-                    else:
-                        warnings.append(f"Anti-Cheating [{rule_name}]: {reason}")
-
-            anti_cheat_passed = sum(1 for r in individual_results if getattr(r, 'passed', True))
-            state.task_state.notes.append(
-                f"[REVIEW] Anti-Cheating: {anti_cheat_passed}/{len(individual_results)} passed"
-            )
+            if result.returncode == 0:
+                return result.stdout
         except Exception as exc:
-            logger.warning("Anti-cheating check failed: %s", exc)
-            state.task_state.notes.append(f"[REVIEW] Anti-Cheating 跳过: {exc}")
-        return violations, warnings
+            logger.debug("Failed to get git diff: %s", exc)
+        return ""
+
+    def _build_fallback_review_prompt(
+        self, state: RunState, diff_text: str, violations: list[str], warnings: list[str]
+    ) -> str:
+        """当 ReviewEngine 不可用时，构造降级版 AI 审查 prompt。"""
+        parts: list[str] = [
+            "## 代码审查（降级模式）",
+            "",
+            "请逐文件审查以下 git diff，从以下维度判断：",
+            "1. 逻辑正确性 / 2. 安全性 / 3. 破坏性变更 / 4. 性能 / 5. 错误处理 / 6. 不必要的抽象",
+            "",
+        ]
+        if violations:
+            parts.append("## Layer1 阻断项")
+            for v in violations:
+                parts.append(f"- {v}")
+            parts.append("")
+        if warnings:
+            parts.append("## Layer1 警告")
+            for w in warnings:
+                parts.append(f"- {w}")
+            parts.append("")
+        if diff_text:
+            parts.append("## Git Diff")
+            parts.append("```diff")
+            parts.append(diff_text[:8000])
+            parts.append("```")
+            parts.append("")
+        parts.extend([
+            "## 输出格式",
+            '返回 JSON: {"passed": true/false, "violations": [{"file": "...", "severity": "BLOCK|WARN", "description": "...", "fix_suggestion": "..."}], "summary": "..."}',
+        ])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _is_docs_only(state: RunState) -> bool:
+        """检查变更是否仅涉及文档/配置文件（可跳过 VERIFY）。"""
+        docs_suffixes = {".md", ".rst", ".txt", ".adoc"}
+        config_only_patterns = {".github/", ".ai/", "docs/", "README"}
+        all_files: list[str] = []
+        for log in state.task_state.task_logs:
+            all_files.extend(log.changed_files)
+        if not all_files:
+            return True
+        for f in all_files:
+            if f.endswith(tuple(docs_suffixes)):
+                continue
+            if any(f.startswith(p) or p in f for p in config_only_patterns):
+                continue
+            return False
+        return True
 
     # ── Plan 合规检查（增强: 逐 Task 对比 PlanContract） ─────
 
@@ -1943,103 +2230,6 @@ class ReviewHandler(StageHandler):
 
         return violations
 
-    # ── Code Quality Gate ──────────────────────────────────────
-
-    def _run_code_quality_check(self, state: RunState) -> tuple[list[str], list[str]]:
-        """运行 Code Quality Gate / Elegance Review（架构 §8.7.11）。
-
-        检查 AI 是否已提交代码质量自评，如果已提交则评估，
-        如果未提交则将检查项加入 pending_prompt。
-        """
-        violations: list[str] = []
-        warnings: list[str] = []
-
-        # 检查是否有 AI 提交的质量自评
-        quality_assessment = state.metadata.get("code_quality_assessment")
-        if not quality_assessment:
-            # 将 Code Quality Gate prompt 加入审查输出
-            try:
-                from engines.guard.code_quality import CodeQualityGate
-                gate = CodeQualityGate()
-                state.metadata["code_quality_prompt"] = gate.render_prompt()
-                state.task_state.notes.append(
-                    "[REVIEW] Code Quality Gate prompt 已生成 — AI 需自评后提交"
-                )
-            except Exception as exc:
-                logger.debug("CodeQualityGate not available: %s", exc)
-            return violations, warnings
-
-        # 评估 AI 的自评结果
-        try:
-            from engines.guard.code_quality import CodeQualityGate
-            gate = CodeQualityGate()
-            report = gate.evaluate(quality_assessment)
-
-            state.metadata["code_quality_report"] = {
-                "score": report.total_score,
-                "max_score": report.max_score,
-                "passed": report.passed,
-                "critical": report.critical_violations,
-                "suggestions": report.suggestions,
-            }
-
-            if not report.passed:
-                violations.append(
-                    f"Code Quality Gate 未通过: score={report.total_score}/{report.max_score}"
-                )
-                for s in report.suggestions[:3]:
-                    violations.append(f"  - {s}")
-
-            if report.critical_violations:
-                violations.append(
-                    f"严重代码质量问题: {', '.join(report.critical_violations)}"
-                )
-
-            state.task_state.notes.append(
-                f"[REVIEW] Code Quality: {report.total_score}/{report.max_score} "
-                f"({'PASS' if report.passed else 'FAIL'})"
-            )
-        except Exception as exc:
-            logger.warning("Code quality evaluation failed: %s", exc)
-
-        return violations, warnings
-
-    # ── 回滚方案自动生成 ───────────────────────────────────────
-
-    def _generate_rollback_if_needed(self, state: RunState) -> str | None:
-        """高风险任务自动生成回滚方案（架构 §16.4）。
-
-        L4/L5 任务或涉及 DDL 变更时强制生成。
-        """
-        intake = state.task_intake
-        risk = intake.risk_level if intake else "L1"
-
-        if risk not in ("L4", "L5"):
-            return None
-
-        try:
-            from pathlib import Path
-
-            from engines.guard.rollback import RollbackPlanner
-
-            project_root = Path(state.project_root) if state.project_root else Path.cwd()
-            planner = RollbackPlanner(project_root=project_root)
-            plans = planner.generate(state)
-            planner.write(plans)
-
-            summary = RollbackPlanner.generate_summary(plans)
-            state.metadata["rollback_plan"] = {
-                "generated": True,
-                "risk_level": risk,
-                "steps": len(plans),
-                "summary": summary,
-            }
-            logger.info("Rollback plan generated for L4/L5 task: %s", summary)
-            return summary
-        except Exception as exc:
-            logger.warning("Rollback plan generation failed: %s", exc)
-            return None
-
     # ── Schema Version 记录 ────────────────────────────────────
 
     def _record_schema_version(self, state: RunState) -> str | None:
@@ -2058,7 +2248,7 @@ class ReviewHandler(StageHandler):
         try:
             from pathlib import Path
 
-            from engines.guard.schema_version import SchemaVersionRecorder
+            from engines.review.schema_version import SchemaVersionRecorder
 
             project_root = Path(state.project_root) if state.project_root else Path.cwd()
             recorder = SchemaVersionRecorder(project_root=project_root)
@@ -2204,22 +2394,19 @@ class DirectExecuteHandler(StageHandler):
 
     def _prepare_direct(self, state: RunState, intake) -> RunState:
         """Direct Mode PREPARE — 构造轻量执行 prompt。"""
-        # 1. 轻量 Guard 检查
+        # 1. 轻量 Review 检查
         try:
-            from engines.guard.engine import Guard
-            from engines.guard.rules import ScopeBoundaryRule, RiskLevelRule
+            from engines.review.engine import ReviewEngine
 
-            guard = Guard()
-            guard.add_rule(ScopeBoundaryRule())
-            guard.add_rule(RiskLevelRule())
-            result = guard.check(state)
+            review = ReviewEngine()
+            result = review.check(state)
             if result.block:
-                return self._stop_failure(state, f"Direct mode guard blocked: {result.reason}")
+                return self._stop_failure(state, f"Direct mode review blocked: {result.reason}")
             individual_results = result.details.get("results", [])
-            passed = sum(1 for r in individual_results if getattr(r, 'passed', True))
-            state.task_state.notes.append(f"[DIRECT] Guard: {passed}/{len(individual_results)} passed")
+            passed = sum(1 for r in individual_results if r.get("passed", True))
+            state.task_state.notes.append(f"[DIRECT] Review: {passed}/{len(individual_results)} passed")
         except Exception as exc:
-            logger.warning("Guard check skipped in direct mode: %s", exc)
+            logger.warning("Review check skipped in direct mode: %s", exc)
 
         # 2. 设置执行状态
         state.task_state.status = state.task_state.status.__class__.IN_PROGRESS

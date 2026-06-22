@@ -103,8 +103,10 @@ SECTION_ORDER = [
 STAGE_RECALL_PRIORITY: dict[str, list[MemoryCategory]] = {
     "spec": [MemoryCategory.ARCHITECTURE, MemoryCategory.MODULE_BOUNDARY, MemoryCategory.RULE],
     "plan": [MemoryCategory.ARCHITECTURE, MemoryCategory.RULE, MemoryCategory.PITFALL],
+    "test_design": [MemoryCategory.VERIFICATION, MemoryCategory.TESTING, MemoryCategory.ARCHITECTURE],
     "execute": [MemoryCategory.RULE, MemoryCategory.PITFALL, MemoryCategory.CODE_STYLE],
     "dev": [MemoryCategory.RULE, MemoryCategory.PITFALL, MemoryCategory.CODE_STYLE],
+    "direct_execute": [MemoryCategory.RULE, MemoryCategory.PITFALL, MemoryCategory.CODE_STYLE],
     "verify": [MemoryCategory.VERIFICATION, MemoryCategory.TESTING, MemoryCategory.FAILURE_PATTERN],
     "repair": [MemoryCategory.FAILURE_PATTERN, MemoryCategory.PITFALL, MemoryCategory.RULE],
     "review": [MemoryCategory.PROHIBITED, MemoryCategory.PITFALL, MemoryCategory.MODULE_BOUNDARY],
@@ -156,14 +158,32 @@ class MemoryStore:
         return self.load_index()
 
     def load_index(self) -> list[MemoryEntry]:
-        """只解析 memory.md 索引行，轻量级。不读 entries/ 正文。"""
+        """解析 memory.md 索引行。合并已有条目，保留 entry 文件的 3 段数据。"""
         if not self.index_path.exists():
             logger.debug("Index not found: %s", self.index_path)
             self._entries = []
             return []
 
         content = self.index_path.read_text(encoding="utf-8")
-        self._entries = self._parse_index(content)
+        new_entries = self._parse_index(content)
+
+        # 合并：保留已有条目中的 3 段数据（trigger/error/fix）
+        if self._entries:
+            existing_map = {e.id: e for e in self._entries}
+            for ne in new_entries:
+                if ne.id in existing_map:
+                    old = existing_map[ne.id]
+                    # 保留已有详细数据
+                    ne.trigger_conditions = ne.trigger_conditions or old.trigger_conditions
+                    ne.error_pattern = ne.error_pattern or old.error_pattern
+                    ne.fix_rule = ne.fix_rule or old.fix_rule
+                    ne.relates_to = ne.relates_to or old.relates_to
+                    ne.caused_by = ne.caused_by or old.caused_by
+                    ne.fixed_by = ne.fixed_by or old.fixed_by
+                    ne.effective_count = ne.effective_count or old.effective_count
+                    ne.ineffective_count = ne.ineffective_count or old.ineffective_count
+
+        self._entries = new_entries
         self._loaded = True
         logger.info("Loaded %d entries from index", len(self._entries))
         return list(self._entries)
@@ -249,40 +269,107 @@ class MemoryStore:
             return None
 
     def _parse_entry_md(self, text: str, entry_id: str) -> MemoryEntry | None:
-        """解析单个 entry markdown 文件。"""
-        lines = text.splitlines()
-        meta: dict[str, str] = {}
-        body_lines: list[str] = []
-        in_body = False
+        """解析 entries/{id}.md 文件。
 
-        for line in lines:
-            line = line.strip()
-            if line.startswith("<!-- ") and line.endswith(" -->"):
-                inner = line[5:-4].strip()
-                if ": " in inner:
-                    k, v = inner.split(": ", 1)
-                    meta[k.strip()] = v.strip()
-            elif not line.startswith("# ") and not in_body:
-                in_body = True
-            if in_body:
-                body_lines.append(line)
+        支持新格式 (YAML frontmatter + Markdown) 和旧格式 (HTML 注释)。
+        """
+        try:
+            import yaml
+        except ImportError:
+            yaml = None
 
-        if not meta:
-            return None
+        # 尝试新格式: YAML frontmatter
+        if yaml and text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    meta = yaml.safe_load(parts[1])
+                    body = parts[2].strip()
+                    if meta and isinstance(meta, dict):
+                        return self._parse_new_entry(meta, body, entry_id)
+                except Exception:
+                    pass  # fall through to legacy parser
 
-        body = "\n".join(body_lines).strip()
+        # 旧格式: HTML 注释
+        return self._parse_legacy_entry(text, entry_id)
 
-        # 尝试解析 details 段
-        details = ""
-        if "## Details" in body:
-            parts = body.split("## Details", 1)
-            details = parts[1].split("## ")[0].strip() if "## " in parts[1] else parts[1].strip()
+    def _parse_new_entry(self, meta: dict, body: str, entry_id: str) -> MemoryEntry:
+        """解析 YAML frontmatter 格式。"""
+        sections = _split_sections(body)
+
+        title = meta.get("title", "")
+        if not title:
+            # Extract from # heading
+            for line in body.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("# ") and not stripped.startswith("## "):
+                    title = stripped[2:].strip()
+                    break
 
         return MemoryEntry(
             id=entry_id,
             category=MemoryCategory(meta.get("category", "rule")),
-            title=meta.get("title", body.split("\n")[0] if body else ""),
-            content=details or body[:200],
+            title=title,
+            content=meta.get("content", sections.get("Notes", "")),
+            source=str(meta.get("source", "manual")),
+            confidence=Confidence(meta.get("confidence", "draft")),
+            tags=meta.get("tags", []),
+            hit_count=int(meta.get("hit_count", 0)),
+            last_hit_at=_parse_dt(meta.get("last_hit_at", "")),
+            created_at=_parse_dt(meta.get("created_at", "")) or datetime.now(),
+            updated_at=_parse_dt(meta.get("updated_at", "")) or datetime.now(),
+            trigger_conditions=sections.get("Trigger", ""),
+            error_pattern=sections.get("Failure Pattern", ""),
+            fix_rule=sections.get("Fix Rule", ""),
+            relates_to=meta.get("relates_to", []),
+            caused_by=meta.get("caused_by", []),
+            fixed_by=meta.get("fixed_by", []),
+            effective_count=int(meta.get("effective_count", 0)),
+            ineffective_count=int(meta.get("ineffective_count", 0)),
+        )
+
+    def _parse_legacy_entry(self, text: str, entry_id: str) -> MemoryEntry | None:
+        """解析旧格式 (HTML 注释 + ## Summary/## Details)。"""
+        lines = text.splitlines()
+        meta: dict[str, str] = {}
+        current_section: str | None = None
+        sections: dict[str, list[str]] = {
+            "Trigger": [],
+            "Failure Pattern": [],
+            "Fix Rule": [],
+            "Notes": [],
+        }
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("<!-- ") and stripped.endswith(" -->"):
+                inner = stripped[5:-4].strip()
+                if ": " in inner:
+                    k, v = inner.split(": ", 1)
+                    meta[k.strip()] = v.strip()
+            elif stripped.startswith("## "):
+                section_name = stripped[3:].strip()
+                for key in sections:
+                    if key.lower() in section_name.lower():
+                        current_section = key
+                        break
+                else:
+                    current_section = None
+            elif current_section and current_section in sections:
+                sections[current_section].append(line)
+
+        if not meta:
+            return None
+
+        relates_to = [r.strip() for r in meta.get("relates_to", "").split(",") if r.strip()]
+        caused_by = [r.strip() for r in meta.get("caused_by", "").split(",") if r.strip()]
+        fixed_by = [r.strip() for r in meta.get("fixed_by", "").split(",") if r.strip()]
+
+        return MemoryEntry(
+            id=entry_id,
+            category=MemoryCategory(meta.get("category", "rule")),
+            title=meta.get("title", ""),
+            content="\n".join(sections["Notes"]).strip(),
             source=meta.get("source", "manual"),
             confidence=Confidence(meta.get("confidence", "draft")),
             tags=[t.strip() for t in meta.get("tags", "").split(",") if t.strip()],
@@ -290,6 +377,14 @@ class MemoryStore:
             last_hit_at=_parse_dt(meta.get("last_hit_at", "")),
             created_at=_parse_dt(meta.get("created_at", "")) or datetime.now(),
             updated_at=_parse_dt(meta.get("updated_at", "")) or datetime.now(),
+            trigger_conditions="\n".join(sections["Trigger"]).strip(),
+            error_pattern="\n".join(sections["Failure Pattern"]).strip(),
+            fix_rule="\n".join(sections["Fix Rule"]).strip(),
+            relates_to=relates_to,
+            caused_by=caused_by,
+            fixed_by=fixed_by,
+            effective_count=int(meta.get("effective_count", 0)),
+            ineffective_count=int(meta.get("ineffective_count", 0)),
         )
 
     # ── 写入 ──────────────────────────────────────────────
@@ -349,32 +444,55 @@ class MemoryStore:
         logger.debug("Index saved to %s", self.index_path)
 
     def save_entry(self, entry: MemoryEntry) -> None:
-        """写入单条记忆的详细正文到 entries/{id}.md。"""
+        """写入单条记忆到 entries/{id}.md。
+
+        YAML frontmatter + 3 段式正文，人机可读。
+        """
+        import yaml
+
         self.entries_dir.mkdir(parents=True, exist_ok=True)
         path = self.entries_dir / f"{entry.id}.md"
 
         now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        frontmatter = {
+            "id": entry.id,
+            "category": entry.category.value,
+            "confidence": entry.confidence.value,
+            "tags": entry.tags,
+            "source": entry.source,
+            "hit_count": entry.hit_count,
+            "last_hit_at": entry.last_hit_at.isoformat() if entry.last_hit_at else None,
+            "effective_count": entry.effective_count,
+            "ineffective_count": entry.ineffective_count,
+            "relates_to": entry.relates_to,
+            "caused_by": entry.caused_by,
+            "fixed_by": entry.fixed_by,
+            "created_at": entry.created_at.isoformat() if entry.created_at else now,
+            "updated_at": now,
+        }
+        # 去掉 None 值
+        frontmatter = {k: v for k, v in frontmatter.items() if v is not None and v != []}
+
+        yaml_header = yaml.dump(frontmatter, allow_unicode=True, default_flow_style=False, sort_keys=False).strip()
+
         lines = [
-            f"# {entry.id}",
+            "---",
+            yaml_header,
+            "---",
             "",
-            f"<!-- category: {entry.category.value} -->",
-            f"<!-- confidence: {entry.confidence.value} -->",
-            f"<!-- tags: {','.join(entry.tags)} -->",
-            f"<!-- source: {entry.source} -->",
-            f"<!-- hit_count: {entry.hit_count} -->",
-            f"<!-- last_hit_at: {entry.last_hit_at.isoformat() if entry.last_hit_at else ''} -->",
-            f"<!-- created_at: {entry.created_at.isoformat() if entry.created_at else now} -->",
-            f"<!-- updated_at: {now} -->",
-            "",
-            f"## Summary",
-            "",
-            entry.title,
-            "",
-            f"## Details",
-            "",
-            entry.content,
+            f"# {entry.title}",
             "",
         ]
+        if entry.trigger_conditions:
+            lines.extend(["## Trigger", "", entry.trigger_conditions, ""])
+        if entry.error_pattern:
+            lines.extend(["## Failure Pattern", "", entry.error_pattern, ""])
+        if entry.fix_rule:
+            lines.extend(["## Fix Rule", "", entry.fix_rule, ""])
+        if entry.content and entry.content != entry.error_pattern:
+            lines.extend(["## Notes", "", entry.content, ""])
+
         path.write_text("\n".join(lines), encoding="utf-8")
         logger.debug("Entry saved: %s", path)
 
@@ -473,12 +591,42 @@ class MemoryStore:
         for e in self._entries:
             if e.id == entry_id:
                 e.record_hit()
-                # 异步更新 entry 文件
                 try:
                     self.save_entry(e)
                 except Exception:
                     pass
                 return
+
+    def record_effectiveness(self, entry_id: str, effective: bool) -> None:
+        """记录记忆效果：effective=True 表示修复规则被应用且通过验证。"""
+        for e in self._entries:
+            if e.id == entry_id:
+                if effective:
+                    e.record_effective()
+                else:
+                    e.record_ineffective()
+
+                # 自动状态转换
+                if e.effective_count >= 3 and e.confidence == Confidence.DRAFT:
+                    e.confidence = Confidence.CONFIRMED
+                    logger.info("Auto-promoted %s: 3x effective (draft→confirmed)", entry_id)
+                if e.ineffective_count >= 3 and e.confidence == Confidence.CONFIRMED:
+                    e.confidence = Confidence.DEPRECATED
+                    logger.info("Auto-deprecated %s: 3x ineffective", entry_id)
+
+                try:
+                    self.save_entry(e)
+                except Exception:
+                    pass
+                self._save_index()
+                return
+
+    def _find_by_id(self, entry_id: str) -> MemoryEntry | None:
+        """按 ID 查找记忆条目。"""
+        for e in self._entries:
+            if e.id == entry_id:
+                return e
+        return None
 
     # ── 召回 ──────────────────────────────────────────────
 
@@ -488,10 +636,18 @@ class MemoryStore:
         stage: str = "",
         limit: int = 5,
         confidence_filter: list[Confidence] | None = None,
+        hop_relationships: bool = True,
     ) -> list[MemoryEntry]:
-        """分级召回：按关键词 + 阶段优先级 + 置信度过滤。
+        """分级召回：关键词 + 阶段优先级 + 效果衰减 + 关系跳数。
 
         不读取 entries/ 正文，只在索引层匹配。
+
+        Args:
+            keywords: 搜索关键词
+            stage: 当前阶段（用于阶段优先级加权）
+            limit: 返回上限
+            confidence_filter: 置信度过滤
+            hop_relationships: 是否沿关系图谱 ±1 跳扩展候选
         """
         if not self._loaded:
             self.load_index()
@@ -499,8 +655,12 @@ class MemoryStore:
         if confidence_filter is None:
             confidence_filter = [Confidence.CONFIRMED, Confidence.DRAFT]
 
-        # 过滤 deprecated
-        candidates = [e for e in self._entries if e.confidence in confidence_filter]
+        # 过滤 deprecated + 效果衰减过滤
+        candidates = [
+            e for e in self._entries
+            if e.confidence in confidence_filter
+            and not (e.ineffective_count >= 3 and e.confidence == Confidence.CONFIRMED)
+        ]
 
         if not candidates:
             return []
@@ -508,37 +668,49 @@ class MemoryStore:
         # 按阶段优先级排序
         priority_cats = STAGE_RECALL_PRIORITY.get(stage.lower(), [])
 
-        scored: list[tuple[int, float, MemoryEntry]] = []
+        scored: list[tuple[float, float, MemoryEntry]] = []
 
         for entry in candidates:
-            score = 0
+            score = 0.0
             keywords_lower = [kw.lower() for kw in (keywords or [])]
-            combined = f"{entry.title} {' '.join(entry.tags)} {entry.category.value}".lower()
+            combined = f"{entry.title} {' '.join(entry.tags)} {entry.category.value} {entry.trigger_conditions}".lower()
 
-            # 关键词匹配
+            # 关键词匹配（trigger_conditions 也算）
             for kw in keywords_lower:
                 if kw in combined:
-                    score += 3
+                    score += 3.0
 
             # 阶段优先级
             if entry.category in priority_cats:
                 cat_idx = priority_cats.index(entry.category)
                 score += len(priority_cats) - cat_idx  # 越靠前加分越多
 
-            # confirmed 加分
-            if entry.confidence == Confidence.CONFIRMED:
-                score += 2
+            # 置信度加权
+            confidence_weight = {
+                Confidence.CONFIRMED: 1.0,
+                Confidence.DRAFT: 0.5,
+                Confidence.DEPRECATED: 0.0,
+            }
+            score *= confidence_weight.get(entry.confidence, 0.5)
+
+            # 效果衰减：连续无效的记忆降权
+            if entry.ineffective_count >= 3:
+                score *= 0.3
+            elif entry.effective_count >= 3:
+                score *= 1.2  # 连续有效加权
 
             # 最近命中加分
             if entry.last_hit_at:
                 days_ago = (datetime.now() - entry.last_hit_at).days
                 if days_ago < 7:
-                    score += 1
+                    score += 1.0
+                elif days_ago > 30:
+                    score -= 1.0  # 冷记忆降权
 
             if score > 0 or not keywords:
                 scored.append((score, entry.hit_count * 0.1, entry))
 
-        # 排序：分数 > 命中次数 > updated_at（负值 = 降序）
+        # 排序：分数 > 命中次数 > updated_at
         scored.sort(key=lambda x: (
             -x[0],
             -x[1],
@@ -546,6 +718,20 @@ class MemoryStore:
         ))
 
         results = [e for _, _, e in scored[:limit]]
+
+        # 关系跳数扩展：±1 跳
+        if hop_relationships:
+            expanded: list[MemoryEntry] = list(results)
+            seen_ids = {e.id for e in results}
+            for entry in results:
+                for rel_id in entry.relates_to + entry.caused_by + entry.fixed_by:
+                    if rel_id not in seen_ids:
+                        rel_entry = self._find_by_id(rel_id)
+                        if rel_entry and rel_entry.confidence in confidence_filter:
+                            expanded.append(rel_entry)
+                            seen_ids.add(rel_id)
+            # 关系扩展不超 limit + 3
+            results = expanded[:limit + 3]
 
         # 记录命中
         for e in results:
@@ -816,6 +1002,30 @@ class MemoryStore:
 
 
 # ── 工具函数 ──────────────────────────────────────────────────
+
+def _split_sections(body: str) -> dict[str, str]:
+    """按 ## 标题切分 Markdown 正文。"""
+    sections: dict[str, str] = {}
+    current_section: str | None = None
+    current_lines: list[str] = []
+
+    for line in body.splitlines():
+        if line.startswith("# ") and current_section is None:
+            # 标题行 (e.g., "# 库存并发扣减超卖")
+            continue
+        elif line.startswith("## "):
+            if current_section and current_lines:
+                sections[current_section] = "\n".join(current_lines).strip()
+            current_section = line[3:].strip()
+            current_lines = []
+        elif current_section:
+            current_lines.append(line)
+
+    if current_section and current_lines:
+        sections[current_section] = "\n".join(current_lines).strip()
+
+    return sections
+
 
 def _parse_dt(s: str) -> datetime | None:
     """安全解析 ISO datetime 字符串。"""

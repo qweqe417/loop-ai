@@ -178,7 +178,7 @@ class CursorAdapter(ToolAdapter):
         created.append(str(loop_config_dst.relative_to(root)))
 
         # 3. Karpathy 行为准则 — 从插件源码原封不动拷贝，不让 AI 发挥
-        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "SKILL.md"
+        karpathy_src = Path(plugin_root) / "skills" / "andrej-karpathy" / "karpathy.md"
         karpathy_dst = root / self.rules_dir / "karpathy.md"
         if karpathy_src.exists():
             karpathy_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +191,7 @@ class CursorAdapter(ToolAdapter):
                 skipped.append(str(karpathy_dst.relative_to(root)))
                 logger.info("karpathy.md already exists, skipping")
         else:
-            logger.warning("karpathy SKILL.md not found at %s, skipping", karpathy_src)
+            logger.warning("karpathy karpathy.md not found at %s, skipping", karpathy_src)
 
         return {
             "success": len(errors) == 0,

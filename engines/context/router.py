@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from engines.state.enums import StageType
 
-from .models import ContextBudget, ContextBundle, ContextPiece
+from .models import ContextBudget, ContextBundle, ContextPiece, TrimmedPointer
 from .sources import CodeGraphSource, FileSource, MemorySource
 from .strategies import STAGE_STRATEGIES
 
@@ -56,9 +56,9 @@ class ContextRouter:
         流程:
         1. 查策略表，调用策略函数收集 ContextPiece
         2. 取该阶段 budget
-        3. 按 priority 排序
-        4. 累加 token，超预算时从 priority=3 开始裁剪
-        5. 组装 ContextBundle
+        3. 按优先级分层 + 相关度排序
+        4. P0 不限量, P1/P2 共享软预算, P3 始终 pointer
+        5. 组装 ContextBundle（含 trimmed_pointers）
         """
         strategy = STAGE_STRATEGIES.get(stage)
         if strategy is None:
@@ -68,24 +68,25 @@ class ContextRouter:
         # 1. 收集
         pieces = strategy(self, run_state)
 
-        # 2. 排序: priority 升序 (1 在前), 同 priority 按 token_estimate 升序
-        pieces.sort(key=lambda p: (p.priority, p.token_estimate))
+        # 2. 排序: priority 升序 (0=P0 在前), 同 priority 按 metadata.relevance 降序
+        pieces.sort(key=lambda p: (p.priority, -(p.metadata.get("relevance", 0) or 0)))
 
         # 3. 裁剪
         budget = self._budgets.get(stage)
         if budget is None:
             budget = ContextBudget(stage=stage, max_tokens=3000)
 
-        trimmed_pieces, was_trimmed = self._trim(pieces, budget)
+        kept_pieces, pointers, was_trimmed = self._trim(pieces, budget)
 
         # 4. 计算 token
-        total = sum(p.token_estimate for p in trimmed_pieces)
+        total = sum(p.token_estimate for p in kept_pieces)
 
         logger.info(
-            "ContextRouter: stage=%s pieces=%d/%d tokens=%d/%d trimmed=%s",
+            "ContextRouter: stage=%s kept=%d/%d pointers=%d tokens=%d/%d trimmed=%s",
             stage.value,
-            len(trimmed_pieces),
+            len(kept_pieces),
             len(pieces),
+            len(pointers),
             total,
             budget.max_tokens,
             was_trimmed,
@@ -93,7 +94,8 @@ class ContextRouter:
 
         return ContextBundle(
             stage=stage,
-            pieces=trimmed_pieces,
+            pieces=kept_pieces,
+            trimmed_pointers=pointers,
             total_tokens=total,
             budget_max=budget.max_tokens,
             budget_used_pct=round(total / budget.max_tokens * 100, 1) if budget.max_tokens else 0.0,
@@ -105,7 +107,9 @@ class ContextRouter:
     def build_project_map(self) -> ContextPiece:
         """构建项目地图。优先用 CodeGraph，fallback 到文件扫描。"""
         if self.codegraph.available:
-            return self.codegraph.get_project_map()
+            pm = self.codegraph.get_project_map()
+            if pm is not None:
+                return pm
         return self.file.scan_structure()
 
     # ── Token 估算 ───────────────────────────────────
@@ -121,49 +125,80 @@ class ContextRouter:
         self,
         pieces: list[ContextPiece],
         budget: ContextBudget,
-    ) -> tuple[list[ContextPiece], bool]:
-        """按预算裁剪 pieces，按优先级分层处理。
+    ) -> tuple[list[ContextPiece], list[TrimmedPointer], bool]:
+        """按预算裁剪 pieces，生成指针保留被裁内容。
 
-        规则:
-        - priority=1（min_priority_keep）始终保留，超预算时记录警告
-        - priority=2 按 token 升序填充剩余预算，超出部分丢弃
-        - priority=3 仅在前两层未耗尽预算时加入，超出部分丢弃
+        优先级体系:
+        - P0 (priority=0): 任务定义，永远不裁剪，无上限
+        - P1 (priority=1): 核心代码，填充共享软预算，按相关度排序
+        - P2 (priority=2): 辅助分析，填充 P1 剩余预算，按相关度排序
+        - P3 (priority=3): 补充信息，始终 pointer，不直接注入
+
+        P1+P2 共享 budget.max_tokens 软预算。
+        超出部分 → TrimmedPointer，AI 可按需回捞。
         """
         if not pieces:
-            return [], False
-
-        total = sum(p.token_estimate for p in pieces)
-        if total <= budget.max_tokens:
-            return list(pieces), False
+            return [], [], False
 
         # 按优先级分层
-        p1 = [p for p in pieces if p.priority == budget.min_priority_keep]
-        p2 = [p for p in pieces if p.priority == budget.min_priority_keep + 1]
-        p3 = [p for p in pieces if p.priority > budget.min_priority_keep + 1]
+        p0 = [p for p in pieces if p.priority == 0]
+        p1 = [p for p in pieces if p.priority == 1]
+        p2 = [p for p in pieces if p.priority == 2]
+        p3 = [p for p in pieces if p.priority >= 3]
 
-        # Priority 1: 始终保留
-        keep: list[ContextPiece] = list(p1)
-        running = sum(p.token_estimate for p in p1)
+        # P0: 永远保留，不计数进预算
+        keep: list[ContextPiece] = list(p0)
+        pointers: list[TrimmedPointer] = []
 
-        if running > budget.max_tokens:
-            logger.warning(
-                "Priority-1 pieces alone exceed budget (%d > %d tokens), keeping all",
-                running, budget.max_tokens,
-            )
+        # P1: 按相关度降序填充共享预算
+        running = sum(p.token_estimate for p in p0)
+        for p in p1:
+            if running + p.token_estimate <= budget.max_tokens:
+                keep.append(p)
+                running += p.token_estimate
+            else:
+                pointers.append(_to_pointer(p, "超出 P1+P2 共享预算"))
 
-        # Priority 2: 按 token_estimate 升序填充剩余预算
-        for p in sorted(p2, key=lambda x: x.token_estimate):
-            if running + p.token_estimate > budget.max_tokens:
-                continue
-            keep.append(p)
-            running += p.token_estimate
+        # P2: 按相关度降序填充剩余预算
+        for p in p2:
+            if running + p.token_estimate <= budget.max_tokens:
+                keep.append(p)
+                running += p.token_estimate
+            else:
+                pointers.append(_to_pointer(p, "超出 P1+P2 共享预算"))
 
-        # Priority 3: 仅当还有预算时加入
-        for p in sorted(p3, key=lambda x: x.token_estimate):
-            if running + p.token_estimate > budget.max_tokens:
-                continue
-            keep.append(p)
-            running += p.token_estimate
+        # P3: 始终 pointer，不直接注入
+        for p in p3:
+            pointers.append(_to_pointer(p, "P3 始终 pointer"))
 
-        was_trimmed = len(keep) < len(pieces)
-        return keep, was_trimmed
+        was_trimmed = len(pointers) > 0
+        return keep, pointers, was_trimmed
+
+
+# ── 裁剪辅助 ──────────────────────────────────────────
+
+def _to_pointer(piece: ContextPiece, reason: str = "") -> TrimmedPointer:
+    """将 ContextPiece 转为 TrimmedPointer。"""
+    return TrimmedPointer(
+        id=f"{piece.source}:{piece.path}" if piece.path else piece.source,
+        type=piece.source,
+        summary=piece.content[:120] if piece.content else piece.path,
+        why_relevant=reason or piece.metadata.get("stage_relevance", ""),
+        estimated_tokens=piece.token_estimate,
+        retrieval_hint=_build_retrieval_hint(piece),
+    )
+
+
+def _build_retrieval_hint(piece: ContextPiece) -> str:
+    """根据 source 类型生成回捞提示。"""
+    source = piece.source
+    path = piece.path
+    if source == "file":
+        return f"Read {path}"
+    elif source == "codegraph":
+        return f"codegraph_explore '{path}'"
+    elif source == "memory":
+        return f"Read .ai/memory/entries/{path}.md"
+    elif source == "run_state":
+        return f"Check run_state.{path}"
+    return f"检索 {source}:{path}"
