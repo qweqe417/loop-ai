@@ -1,18 +1,29 @@
-"""ReviewEngine —— 编排 Layer1 (Python 规则) + Layer2 (AI 审查 prompt)。
+"""ReviewEngine —— Layer1 机械规则引擎。
+
+只做 Python 确定性检测，供 GateHandler 使用。
+Layer2 AI 语义审查由 SDD code-reviewer subagent 完成。
 
 用法:
-    engine = create_review_engine()
-    result = engine.check(state)             # 跑 4 条 Python 规则
-    prompt = engine.build_ai_review_prompt(state, diff_text, result)  # 组装 AI 审查 prompt
+    engine = ReviewEngine()
+    results = engine.run_layer1(state)
+    blocked = any(r.block for r in results)
 """
 
+# 启用延迟注解求值
 from __future__ import annotations
 
+# 导入 logging 库，用于日志记录
 import logging
+# 导入 TYPE_CHECKING，用于类型检查时避免循环导入
 from typing import TYPE_CHECKING
 
-from .models import ReviewResult, ReviewSeverity
+# 导入审查结果模型
+from .models import ReviewResult
+# 导入所有内置审查规则
 from .rules import (
+    AssertionDeletionRule,
+    DiffBudgetRule,
+    LintIntegrationRule,
     ReviewRule,
     ScopeBoundaryRule,
     SecretScanRule,
@@ -20,206 +31,124 @@ from .rules import (
     TestIntegrityRule,
 )
 
+# 仅在类型检查时导入，避免运行时循环导入
 if TYPE_CHECKING:
     from engines.state.models import RunState
 
+# 创建当前模块的日志记录器
 logger = logging.getLogger(__name__)
-
-# 默认规则集
-DEFAULT_RULES: tuple[type[ReviewRule], ...] = (
-    SecretScanRule,
-    TestIntegrityRule,
-    ScopeBoundaryRule,
-    SkipDetectionRule,
-)
 
 
 class ReviewEngine:
-    """审查引擎 —— 规则注册 + 批量检查 + AI review prompt 构造。
+    """Layer1 机械规则引擎。
 
-    用法:
-        engine = ReviewEngine()
-        engine.add_rule(MyCustomRule())
-        result = engine.check(state)
-        if result.block:
-            print(f"Blocked: {result.reason}")
-
-    扩展:
-        from engines.review import create_review_engine, ReviewRule
-
-        class MyRule(ReviewRule):
-            name = "my-rule"
-            severity = ReviewSeverity.WARN
-            def check(self, state):
-                ...
-
-        engine = create_review_engine(extra_rules=[MyRule()])
+    运行 7 条 Python 确定性检测规则，供 GateHandler 使用。
+    支持通过 extra_rules 注入自定义规则，disabled_rules 禁用规则。
     """
 
-    def __init__(self, rules: list[ReviewRule] | None = None) -> None:
-        self._rules: list[ReviewRule] = rules or self._create_defaults()
+    # ── 内置规则列表 ─────────────────────────────────
+    # 所有内置规则，按注册顺序执行
+    _BUILTIN_RULES: list[type[ReviewRule]] = [
+        SecretScanRule,          # 硬编码凭证扫描
+        ScopeBoundaryRule,       # Plan 越界检查
+        TestIntegrityRule,       # 测试完整性
+        SkipDetectionRule,       # Skip 标记检测
+        AssertionDeletionRule,   # 断言删除检测
+        DiffBudgetRule,          # 变更预算检查
+        LintIntegrationRule,     # Lint 集成
+    ]
 
-    # ── 规则管理 ──────────────────────────────────────────────
+    def __init__(
+        self,
+        extra_rules: list[ReviewRule] | None = None,
+        disabled_rules: list[str] | None = None,
+    ) -> None:
+        # 额外规则列表（下游项目注入）
+        self._extra_rules: list[ReviewRule] = extra_rules or []
+        # 禁用的规则名称集合
+        self._disabled_rules: set[str] = set(disabled_rules or [])
 
-    def add_rule(self, rule: ReviewRule) -> None:
-        self._rules.append(rule)
-        logger.debug("Review rule added: %s", rule)
+    def run_layer1(self, state: RunState) -> list[ReviewResult]:
+        """仅运行 Layer1 确定性规则（供外部独立调用）。
 
-    def remove_rule(self, name: str) -> bool:
-        before = len(self._rules)
-        self._rules = [r for r in self._rules if r.name != name]
-        return len(self._rules) < before
+        Args:
+            state: 运行状态
 
-    @property
-    def rules(self) -> list[ReviewRule]:
-        return list(self._rules)
+        Returns:
+            审查结果列表
+        """
+        return self._run_layer1(state)
 
-    # ── Layer 1: Python 规则检查 ──────────────────────────────
+    # ── Layer1 实现 ───────────────────────────────────
 
-    def check(self, state: RunState) -> ReviewResult:
-        """逐条执行所有规则，返回聚合结果。
+    def _run_layer1(self, state: RunState) -> list[ReviewResult]:
+        """运行 Layer1 确定性规则。
 
-        有一条 BLOCK 且未通过 → 最终 block=True。
-        WARN 收集但不阻断。
+        依次执行内置规则和额外规则，跳过禁用的规则。
+
+        Args:
+            state: 运行状态
+
+        Returns:
+            审查结果列表
         """
         results: list[ReviewResult] = []
-        blocked = False
 
-        for rule in self._rules:
+        # 实例化并执行内置规则
+        for rule_cls in self._BUILTIN_RULES:
+            rule = rule_cls()
+            # 跳过被禁用的规则
+            if rule.name in self._disabled_rules:
+                logger.info("Layer1: skipping disabled rule %s", rule.name)
+                continue
+            try:
+                # 执行规则检查
+                result = rule.check(state)
+                results.append(result)
+                # 记录结果等级
+                logger.info(
+                    "Layer1: %s → %s",
+                    rule.name,
+                    result.severity.value.upper() if not result.passed else "PASS",
+                )
+            except Exception as e:
+                # 规则执行异常时转为 WARN 结果
+                logger.exception("Layer1 rule %s failed with exception", rule.name)
+                results.append(ReviewResult.warn(
+                    rule.name,
+                    f"规则执行异常: {e}",
+                ))
+
+        # 执行额外规则（下游项目注入）
+        for rule in self._extra_rules:
+            if rule.name in self._disabled_rules:
+                continue
             try:
                 result = rule.check(state)
                 results.append(result)
-                if result.block:
-                    blocked = True
-                    logger.warning("Review BLOCKED by %s: %s", rule.name, result.reason)
-                elif result.severity == ReviewSeverity.WARN:
-                    logger.info("Review WARN from %s: %s", rule.name, result.reason)
-                else:
-                    logger.debug("Review PASS: %s", rule.name)
-            except Exception as exc:
-                logger.exception("Review rule %s raised exception", rule.name)
-                results.append(
-                    ReviewResult.blocked(rule.name, f"规则执行异常: {exc}", exception=str(exc))
-                )
-                blocked = True
+            except Exception as e:
+                logger.exception("Extra rule %s failed", rule.name)
+                results.append(ReviewResult.warn(
+                    rule.name,
+                    f"额外规则执行异常: {e}",
+                ))
 
-        return self._aggregate(results, blocked)
-
-    # ── Layer 2: AI 审查 prompt 构造 ──────────────────────────
-
-    def build_ai_review_prompt(
-        self,
-        state: RunState,
-        diff_text: str,
-        layer1_result: ReviewResult,
-    ) -> str:
-        """基于 Layer1 结果 + git diff + Plan 合约 + Memory 构造 AI 审查 prompt。"""
-
-        parts: list[str] = [
-            "## 代码审查",
-            "",
-            "请逐文件审查以下 git diff，从以下维度判断：",
-            "",
-            "1. **逻辑正确性** — 实现是否符合 Plan 预期？有没有明显的逻辑错误？",
-            "2. **安全性** — 有没有注入风险、越权、敏感数据泄露？",
-            "3. **破坏性变更** — 是否修改了现有接口签名？会不会影响调用方？",
-            "4. **性能** — 有没有 N+1 查询、不必要的循环、阻塞 I/O？",
-            "5. **错误处理** — 异常是否正确处理？有没有吞掉关键错误？",
-            "6. **不必要的抽象** — 有没有为单一用途引入的过度抽象？",
-            "",
-        ]
-
-        # Layer1 结果摘要
-        layer1_results = layer1_result.details.get("results", [])
-        failed = [r for r in layer1_results if not r.get("passed")]
-        warnings_list = [r for r in layer1_results if r.get("severity") == "warn"]
-
-        if failed:
-            parts.append("## 阻断项（必须先修复）")
-            for r in failed:
-                parts.append(f"- [{r['rule']}] {r['reason']}")
-            parts.append("")
-
-        if warnings_list:
-            parts.append("## 需要解释/修复的警告")
-            for r in warnings_list:
-                parts.append(f"- [{r['rule']}] {r['reason']}")
-            parts.append("")
-
-        # Plan 合约摘要
-        contracts = state.plan_contracts
-        if contracts:
-            parts.append("## Plan 合约")
-            for c in contracts:
-                task_id = c.get("task_id", "?")
-                allowed = c.get("allowed_files", [])
-                parts.append(f"- **{task_id}**: allowed_files={allowed}")
-            parts.append("")
-
-        # Git diff
-        if diff_text:
-            max_diff = 8000
-            truncated = diff_text[:max_diff]
-            parts.append("## Git Diff")
-            parts.append("```diff")
-            parts.append(truncated)
-            if len(diff_text) > max_diff:
-                parts.append(f"... (truncated, {len(diff_text)} chars total)")
-            parts.append("```")
-            parts.append("")
-
-        # 输出格式要求
-        parts.extend([
-            "## 输出格式",
-            "返回 JSON:",
-            "```json",
-            "{",
-            '  "passed": true/false,',
-            '  "violations": [{"file": "...", "severity": "BLOCK|WARN", "description": "...", "fix_suggestion": "..."}],',
-            '  "summary": "一句话总结"',
-            "}",
-            "```",
-        ])
-
-        return "\n".join(parts)
-
-    # ── 内部 ──────────────────────────────────────────────────
-
-    def _aggregate(self, results: list[ReviewResult], blocked: bool) -> ReviewResult:
-        if not results:
-            return ReviewResult.ok("review", "无规则注册")
-
-        parts = [f"[{r.rule_name}] {r.reason}" for r in results]
-        details = {
-            "total_rules": len(results),
-            "passed": sum(1 for r in results if r.passed),
-            "blocked_count": sum(1 for r in results if r.block),
-            "results": [
-                {"rule": r.rule_name, "severity": r.severity.value, "passed": r.passed, "reason": r.reason}
-                for r in results
-            ],
-        }
-
-        if blocked:
-            return ReviewResult(
-                rule_name="review", severity=ReviewSeverity.BLOCK,
-                passed=False, block=True, reason="\n".join(parts), details=details,
-            )
-        return ReviewResult(
-            rule_name="review", severity=ReviewSeverity.PASS,
-            passed=True, block=False, reason="\n".join(parts), details=details,
-        )
-
-    @staticmethod
-    def _create_defaults() -> list[ReviewRule]:
-        return [cls() for cls in DEFAULT_RULES]
+        return results
 
 
-# ── 便捷工厂 ──────────────────────────────────────────────────────
+# ── 便捷工厂函数 ──────────────────────────────────────
 
-def create_review_engine(extra_rules: list[ReviewRule] | None = None) -> ReviewEngine:
-    """创建 ReviewEngine —— 自动注册 4 条默认规则。"""
-    rules = ReviewEngine._create_defaults()
-    if extra_rules:
-        rules.extend(extra_rules)
-    return ReviewEngine(rules=rules)
+def create_review_engine(
+    extra_rules: list[ReviewRule] | None = None,
+    disabled_rules: list[str] | None = None,
+) -> ReviewEngine:
+    """创建 ReviewEngine 实例的便捷工厂函数。
+
+    Args:
+        extra_rules: 额外规则列表
+        disabled_rules: 禁用的规则名称列表
+
+    Returns:
+        ReviewEngine 实例
+    """
+    return ReviewEngine(extra_rules=extra_rules, disabled_rules=disabled_rules)

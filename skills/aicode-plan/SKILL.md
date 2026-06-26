@@ -32,7 +32,7 @@ description: "Generate an Execution Plan — break requirements into tasks with 
 
 ### 步骤 1：强检 superpowers（阻断）
 
-尝试调用 `Skill: superpowers:planning`。
+尝试调用 `Skill: superpowers:writing-plans`。
 
 - **成功** → 继续步骤 2。
 - **失败**（skill not found）→ 告诉用户："superpowers 是 plan 生成的必需依赖，正在自动安装..."
@@ -94,7 +94,7 @@ description: "Generate an Execution Plan — break requirements into tasks with 
 
 ### 步骤 6：superpowers 做实现方案分析
 
-调用 `Skill: superpowers:planning`，输入：
+调用 `Skill: superpowers:writing-plans`，输入：
 
 | 输入 | 内容 |
 |------|------|

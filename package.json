@@ -1,0 +1,17 @@
+{
+  "name": "loop",
+  "version": "1.0.0",
+  "description": "This repository hosts the skeleton for the AI Coding Loop system.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^26.0.1"
+  }
+}

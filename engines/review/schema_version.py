@@ -4,20 +4,28 @@
 用于追踪数据库 schema 演变历史。
 """
 
+# 启用延迟注解求值
 from __future__ import annotations
 
+# 导入 logging 库，用于日志记录
 import logging
+# 导入 re 库，用于正则匹配
 import re
+# 导入 datetime 用于生成时间戳
 from datetime import datetime
+# 导入 Path 类，用于处理文件路径
 from pathlib import Path
+# 导入 TYPE_CHECKING，用于类型检查时避免循环导入
 from typing import TYPE_CHECKING
 
+# 仅在类型检查时导入，避免运行时循环导入
 if TYPE_CHECKING:
     from engines.state.models import RunState
 
+# 创建当前模块的日志记录器
 logger = logging.getLogger(__name__)
 
-# DDL/Migration 文件匹配模式
+# DDL/Migration 文件匹配模式列表
 MIGRATION_PATTERNS: list[str] = [
     # SQL 文件
     r"\.sql$",
@@ -26,10 +34,10 @@ MIGRATION_PATTERNS: list[str] = [
     r"alembic/versions/.+\.py$",
     r"db/migrate/.+",
     r"flyway/migrations?/.+",
-    # Prisma
+    # Prisma 迁移
     r"prisma/.+\.prisma$",
     r"prisma/migrations/.+",
-    # Sequelize / TypeORM
+    # Sequelize / TypeORM 迁移
     r"migrations?/\d{8,14}.+\.(js|ts)$",
     r"migrations?/timestamp.+\.(js|ts)$",
     # 常见 schema 文件
@@ -47,7 +55,7 @@ MIGRATION_PATTERNS: list[str] = [
     r"types?\.(ts|go|rs|py)$",  # 可能包含 schema 定义
 ]
 
-# 非 migration 文件排除（减少误报）
+# 非 migration 文件排除模式（减少误报）
 EXCLUDE_PATTERNS: list[str] = [
     r"node_modules/",
     r"__pycache__/",
@@ -60,12 +68,21 @@ EXCLUDE_PATTERNS: list[str] = [
 
 
 def is_migration_file(filepath: str) -> bool:
-    """判断是否为 DDL/migration 文件。"""
-    # 排除
+    """判断是否为 DDL/migration 文件。
+
+    先执行排除模式匹配，再执行迁移文件模式匹配。
+
+    Args:
+        filepath: 文件路径
+
+    Returns:
+        是否为迁移文件
+    """
+    # 排除：匹配排除模式的文件不是迁移文件
     for pat in EXCLUDE_PATTERNS:
         if re.search(pat, filepath):
             return False
-    # 匹配
+    # 匹配：匹配迁移模式的文件是迁移文件
     for pat in MIGRATION_PATTERNS:
         if re.search(pat, filepath, re.IGNORECASE):
             return True
@@ -73,7 +90,14 @@ def is_migration_file(filepath: str) -> bool:
 
 
 def detect_migration_files(changed_files: list[str]) -> list[str]:
-    """从变更文件列表中筛选 DDL/migration 文件。"""
+    """从变更文件列表中筛选 DDL/migration 文件。
+
+    Args:
+        changed_files: 变更文件路径列表
+
+    Returns:
+        迁移文件路径列表
+    """
     return [f for f in changed_files if is_migration_file(f)]
 
 
@@ -85,10 +109,13 @@ class SchemaVersionRecorder:
         recorder.record(changed_files=["migrations/001_add_users.py"], task_id="T1")
     """
 
+    # 输出文件路径
     OUTPUT_PATH = ".ai/schema_version.md"
 
     def __init__(self, project_root: str | Path = ".") -> None:
+        # 项目根目录
         self._root = Path(project_root)
+        # 输出文件完整路径
         self._path = self._root / self.OUTPUT_PATH
 
     def record(
@@ -99,9 +126,17 @@ class SchemaVersionRecorder:
     ) -> str | None:
         """检测并记录 schema 变更。
 
+        从变更文件中筛选迁移文件，生成版本条目并追加到 schema_version.md。
+
+        Args:
+            changed_files: 变更文件列表
+            task_id: 任务标识
+            description: 变更描述
+
         Returns:
-            记录的版本条目文本，无变更时返回 None。
+            记录的版本条目文本，无变更时返回 None
         """
+        # 筛选迁移文件
         migration_files = detect_migration_files(changed_files)
         if not migration_files:
             return None
@@ -109,7 +144,7 @@ class SchemaVersionRecorder:
         # 读取现有记录
         existing = self._read_existing()
 
-        # 计算新版本号
+        # 计算新版本号（自动递增）
         version = self._next_version(existing)
 
         # 生成新条目
@@ -131,7 +166,16 @@ class SchemaVersionRecorder:
         return entry
 
     def record_from_state(self, state: RunState) -> str | None:
-        """从 RunState 自动提取变更并记录。"""
+        """从 RunState 自动提取变更并记录。
+
+        收集所有 task_logs 中的 changed_files，自动筛选并记录。
+
+        Args:
+            state: 运行状态
+
+        Returns:
+            记录的版本条目文本，无变更时返回 None
+        """
         # 收集所有 task_logs 中的 changed_files
         all_files: list[str] = []
         for log in state.task_state.task_logs:
@@ -149,7 +193,13 @@ class SchemaVersionRecorder:
     # ── 内部方法 ──────────────────────────────────────────
 
     def _read_existing(self) -> list[str]:
-        """读取现有 schema_version.md，返回条目列表。"""
+        """读取现有 schema_version.md，返回条目列表。
+
+        每个条目以 "## v" 开头的行开始，到下一个 "## v" 或文件尾结束。
+
+        Returns:
+            版本条目文本列表
+        """
         if not self._path.exists():
             return []
         content = self._path.read_text(encoding="utf-8")
@@ -168,7 +218,16 @@ class SchemaVersionRecorder:
         return entries
 
     def _next_version(self, existing: list[str]) -> int:
-        """计算下一个版本号。"""
+        """计算下一个版本号。
+
+        扫描已有条目中的最大版本号，加 1 返回。
+
+        Args:
+            existing: 已有版本条目列表
+
+        Returns:
+            下一个版本号
+        """
         max_v = 0
         for entry in existing:
             m = re.match(r"^## v(\d+)", entry)
@@ -183,7 +242,17 @@ class SchemaVersionRecorder:
         files: list[str],
         description: str,
     ) -> str:
-        """格式化版本条目。"""
+        """格式化版本条目为 Markdown 文本。
+
+        Args:
+            version: 版本号
+            task_id: 任务标识
+            files: 迁移文件列表
+            description: 变更描述
+
+        Returns:
+            格式化的 Markdown 条目文本
+        """
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         lines = [
             f"## v{version}",
@@ -200,9 +269,15 @@ class SchemaVersionRecorder:
         return "\n".join(lines) + "\n"
 
     def _write(self, entries: list[str]) -> None:
-        """写回 schema_version.md。"""
+        """写回 schema_version.md。
+
+        Args:
+            entries: 版本条目列表
+        """
+        # 确保父目录存在
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
+        # 文件头部
         header = (
             "# Schema 版本记录\n\n"
             "> 自动记录 DDL/migration 文件变更，用于追踪数据库 schema 演变。\n"

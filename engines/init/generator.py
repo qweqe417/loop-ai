@@ -9,17 +9,24 @@ init 只生成主配置文件（CLAUDE.md 等）和 .ai/ 跨工具资产。
 skills/ 和 MCP 配置由 adapter.install() 在插件安装时写入。
 """
 
+# 启用延迟注解求值
 from __future__ import annotations
 
+# 导入 logging 库，用于日志记录
 import logging
+# 导入 datetime 用于生成时间戳
 from datetime import datetime
+# 导入 Path 类，用于处理文件路径
 from pathlib import Path
+# 导入 TYPE_CHECKING 和 Any 类型，用于类型注解
 from typing import TYPE_CHECKING, Any
 
+# 仅在类型检查时导入，避免运行时循环导入
 if TYPE_CHECKING:
     from engines.adapters.base import ToolAdapter
     from .models import ProjectProfile, InitReport
 
+# 创建当前模块的日志记录器
 logger = logging.getLogger(__name__)
 
 
@@ -42,18 +49,26 @@ class FileGenerator:
         adapter: ToolAdapter | None = None,
         providers: list[Any] | None = None,
     ) -> None:
+        # 项目完整画像
         self.profile = profile
+        # 项目根目录
         self._root = Path(project_root)
+        # 工具适配器
         self._adapter = adapter
+        # Provider 列表
         self._providers = providers or []
+        # 已创建的文件列表
         self._created: list[str] = []
+        # 已跳过的文件列表
         self._skipped: list[str] = []
+        # 已合并的文件列表
         self._merged: list[str] = []
 
     @property
     def adapter(self) -> ToolAdapter:
         """获取工具适配器。未设置时默认使用 ClaudeCodeAdapter。"""
         if self._adapter is None:
+            # 延迟导入 ClaudeCodeAdapter
             from engines.adapters.claude import ClaudeCodeAdapter
             self._adapter = ClaudeCodeAdapter()
         return self._adapter
@@ -63,11 +78,16 @@ class FileGenerator:
 
         注意：不含主配置文件和规则文件 —— 这些由 AI 通过 karpathy.md 直接写入。
         Python 只负责 .ai/ 资产目录。
+
+        Returns:
+            已创建的文件路径列表
         """
+        # 重置计数器
         self._created = []
         self._skipped = []
         self._merged = []
 
+        # 生成 .ai/ 跨工具资产
         self._generate_ai_assets()
 
         logger.info(
@@ -83,11 +103,19 @@ class FileGenerator:
         """仅生成 .ai/ 跨工具资产（与 generate_all() 等价）。
 
         Python 不生成配置内容 —— 所有 CLAUDE.md / rules/*.md 由 AI 写入。
+
+        Returns:
+            已创建的文件路径列表
         """
         return self.generate_all()
 
     def build_report(self) -> InitReport:
-        """构建 InitReport。"""
+        """构建 InitReport。
+
+        Returns:
+            初始化报告对象
+        """
+        # 导入 InitReport 模型
         from .models import InitReport
 
         p = self.profile
@@ -107,138 +135,27 @@ class FileGenerator:
     # ── .ai/ 跨工具资产 ──────────────────────────────────
 
     def _generate_ai_assets(self) -> None:
-        """初始化 .ai/ 目录及所有子资产。"""
+        """初始化 .ai/ 目录及必要子资产。"""
         ai_dir = self._root / ".ai"
         ai_dir.mkdir(parents=True, exist_ok=True)
 
-        self._init_memory_structure(ai_dir)
-        self._init_scenarios(ai_dir)
-
-        # .ai/config.yaml — 项目公共配置
-        config_path = ai_dir / "config.yaml"
-        if not config_path.exists():
-            self._write_yaml(config_path, {
-                "version": 1,
-                "project": self.profile.project_name,
-                "language": self.profile.language,
-                "test_framework": self.profile.test_framework or "",
-                "memory": {
-                    "max_entries": 200,
-                    "draft_stale_days": 30,
-                    "projection_targets": ["claude", "codex", "cursor"],
-                },
-                "loop": {
-                    "default_flow": "full",
-                    "stages": [
-                        "intake", "spec", "plan", "execute",
-                        "verify", "repair", "review", "memory",
-                    ],
-                },
-                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            })
-            self._created.append(".ai/config.yaml")
-
-        # .ai/fixtures/
+        # .ai/fixtures/ — 测试数据目录
         (ai_dir / "fixtures").mkdir(parents=True, exist_ok=True)
 
-        # .ai/runs/
-        (ai_dir / "runs").mkdir(parents=True, exist_ok=True)
+        # .ai/scenarios/ — 场景目录 + 示例模板
+        self._init_scenarios(ai_dir)
 
-        # .ai/spec-index.yaml
-        spec_index = ai_dir / "spec-index.yaml"
-        if not spec_index.exists():
-            spec_index.write_text(
-                "# AI Coding Loop — Spec Index\n"
-                "# 记录所有 Spec 文件的索引和状态\n\n"
-                "version: 1\n"
-                "providers: []\n"
-                "specs: []\n",
-                encoding="utf-8",
-            )
-
-    def _init_memory_structure(self, ai_dir: Path) -> None:
-        """初始化三层记忆目录结构。"""
-        memory_dir = ai_dir / "memory"
-        memory_dir.mkdir(parents=True, exist_ok=True)
-
-        # 创建子目录
-        for subdir in [
-            "entries",
-            "sessions",
-            "archive/deprecated",
-            "archive/stale",
-            "projections",
-        ]:
-            d = memory_dir / subdir
-            d.mkdir(parents=True, exist_ok=True)
-            (d / ".gitkeep").touch(exist_ok=True)
-
-        # .ai/memory.md — 空索引模板
-        index_path = ai_dir / "memory.md"
-        if not index_path.exists():
-            now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-            index_path.write_text(
-                "# 项目记忆\n"
-                "\n"
-                f"> 更新: {now} | 总计: 0 | confirmed: 0 | draft: 0 | deprecated: 0\n"
-                "\n"
-                "> 此文件是权威记忆索引，只放高价值摘要，不放长文。\n"
-                "> 详细正文在 .ai/memory/entries/ 下。\n"
-                "\n"
-                "## 通用规则\n\n<!-- 暂无条目 -->\n\n"
-                "## 历史坑\n\n<!-- 暂无条目 -->\n\n"
-                "## 验证模式\n\n<!-- 暂无条目 -->\n\n"
-                "## 测试经验\n\n<!-- 暂无条目 -->\n\n"
-                "## 模块边界\n\n<!-- 暂无条目 -->\n\n"
-                "## 架构决策\n\n<!-- 暂无条目 -->\n\n"
-                "## 失败模式\n\n<!-- 暂无条目 -->\n\n"
-                "## 禁止事项\n\n<!-- 暂无条目 -->\n\n"
-                "## 代码风格\n\n<!-- 暂无条目 -->\n",
-                encoding="utf-8",
-            )
-            self._created.append(".ai/memory.md")
-
-        # .ai/memory/stats.json — 运营面板空数据
-        stats_path = memory_dir / "stats.json"
-        if not stats_path.exists():
-            import json
-            stats_path.write_text(json.dumps({
-                "total_entries": 0,
-                "by_category": {},
-                "confirmed": 0,
-                "draft": 0,
-                "deprecated": 0,
-                "archived": 0,
-                "last_updated": now,
-                "last_compression": "",
-                "last_archival": "",
-                "last_projection": "",
-                "hot_tags": [],
-                "cold_entries": [],
-            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        # .ai/loop-config.json — 服务启停 + 鉴权配置
+        self._generate_loop_config(ai_dir)
 
     def _init_scenarios(self, ai_dir: Path) -> None:
-        """初始化场景目录：config.yaml + example.yaml。"""
+        """初始化场景目录：生成 example.yaml 模板。
+
+        Args:
+            ai_dir: .ai/ 目录路径
+        """
         scenarios_dir = ai_dir / "scenarios"
         scenarios_dir.mkdir(parents=True, exist_ok=True)
-
-        # config.yaml — 公共配置
-        config_path = scenarios_dir / "config.yaml"
-        if not config_path.exists():
-            self._write_yaml(config_path, {
-                "version": 1,
-                "scenarios_dir": ".ai/scenarios",
-                "fixtures_dir": ".ai/fixtures",
-                "default_sanity_checks": [
-                    {"name": "http-local", "resource": "http", "target": "http://localhost:8080"},
-                ],
-                "execution": {
-                    "timeout_seconds": 60,
-                    "stop_on_first_failure": False,
-                    "cleanup_on_success": True,
-                },
-            })
-            self._created.append(".ai/scenarios/config.yaml")
 
         # example.yaml — 可工作的场景模板
         example_path = scenarios_dir / "example.yaml"
@@ -276,13 +193,85 @@ class FileGenerator:
             })
             self._created.append(".ai/scenarios/example.yaml")
 
+    def _generate_loop_config(self, ai_dir: Path) -> None:
+        """生成 .ai/loop-config.json，包含 auto-detected 的服务启停 + 鉴权配置。
+
+        单体项目生成 1 条 service，微服务生成多条（用户可按需 enabled=false）。
+        已存在则跳过（adapter.install() 后续会合入 template_vars）。
+        """
+        import json
+
+        config_path = ai_dir / "loop-config.json"
+        p = self.profile
+
+        # 构建 services 列表
+        services: list[dict] = []
+        if p.service_services:
+            # 微服务：多条
+            services = p.service_services
+        elif p.service_start_command:
+            # 单体：一条
+            svc = {
+                "name": "app",
+                "start": p.service_start_command,
+                "health": p.service_health_url,
+                "startup_timeout": 90,
+            }
+            if p.service_ready_pattern:
+                svc["ready_pattern"] = p.service_ready_pattern
+            services.append(svc)
+
+        config = {
+            "auth": {
+                "token": "粘贴你的JWT token到这里",
+            },
+            "data_sources": {
+                # 示例：取消注释并修改为实际连接信息
+                # "main_db": {
+                #     "type": "mysql",
+                #     "host": "localhost",
+                #     "port": 3306,
+                #     "user": "root",
+                #     "password": "",
+                #     "database": "test"
+                # },
+                # "cache": {
+                #     "type": "redis",
+                #     "host": "localhost",
+                #     "port": 6379,
+                #     "password": "",
+                #     "db": 0
+                # }
+            },
+        }
+        if services:
+            config["services"] = services
+
+        # 写入（不覆盖已有配置）
+        if not config_path.exists():
+            config_path.write_text(
+                json.dumps(config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self._created.append(".ai/loop-config.json")
+        else:
+            logger.info(".ai/loop-config.json already exists, skipping")
+            self._skipped.append(".ai/loop-config.json")
+
     @staticmethod
     def _write_yaml(path: Path, data: dict) -> None:
-        """写入 YAML 文件，fallback 到 JSON。"""
+        """写入 YAML 文件，fallback 到 JSON。
+
+        Args:
+            path: 目标文件路径
+            data: 要写入的数据字典
+        """
         try:
+            # 尝试使用 yaml 库写入
             import yaml
             content = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
         except ImportError:
+            # yaml 库不可用时 fallback 到 JSON
             import json
             content = json.dumps(data, ensure_ascii=False, indent=2)
         path.write_text(content, encoding="utf-8")
@@ -290,26 +279,37 @@ class FileGenerator:
     # ── 下一步建议 ─────────────────────────────────────────
 
     def _build_next_steps(self) -> list[str]:
+        """构建下一步操作建议。
+
+        Returns:
+            建议步骤列表
+        """
         p = self.profile
         adapter = self.adapter
         steps: list[str] = []
 
+        # 如果有缺失的推荐插件，建议安装
         if p.missing_recommended:
             for m in p.missing_recommended:
                 steps.append(f"安装推荐插件: {m}")
 
+        # 代码规范可信度低时建议校准
         if p.code_style.confidence in ("low",):
             steps.append("运行 `aicode calibrate` 确认代码规范")
 
+        # 未检测到测试框架时建议手动配置
         if not p.test_framework:
             steps.append("手动配置测试框架和运行命令")
 
+        # 检测到外部资源时建议配置 data_sources
         if p.resources:
-            steps.append(f"为检测到的外部资源配置 MCP Server（{adapter.display_name}）：")
+            steps.append("检测到外部资源，在 .ai/loop-config.json 的 data_sources 中配置连接信息：")
             for r in p.resources:
-                steps.append(f"  - {r.name}: `aicode mcp setup {r.type}`")
+                steps.append(f"  - {r.name} (type={r.type}): 配置 host/port/user/password/database")
 
+        # 获取工具的命令前缀
         cp = adapter.command_prefix
+        # 建议下一步操作
         steps.append(f"运行 `{cp}aicode-spec <需求>` 生成第一个 Spec")
         steps.append(f"或运行 `{cp}aicode-direct <小改动>` 体验快速通道")
 

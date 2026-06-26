@@ -1,58 +1,440 @@
 ---
 name: aicode-review
 user-invocable: true
-description: "Review code changes — check diff, guard violations, plan compliance"
+description: "生产级代码审查 — 6维静态审查（正确性/安全/合约/工程/简洁/兼容），支持独立触发和Loop内自动触发"
 ---
 
-# /aicode-review — Code Review
+# /aicode-review — 生产级代码审查
 
-Run a comprehensive review of the current changes against the plan and guard rules.
+对所有代码变更执行 6 维静态审查。可独立触发，也可在 Loop 内自动触发。
 
-## Trigger
+## 触发方式
 
 ```
-/aicode-review
+/aicode-review                        # 审当前未提交的改动
+/aicode-review --scope HEAD~3..HEAD   # 审指定 git range
 ```
 
-## Execution
+Loop 内自动触发时（`/aicode-full` 或 `/aicode-dev`），Python 状态机会在 EXECUTE 完成后自动推入 REVIEW 阶段。
 
-### Step 1: Run guard check
+---
+
+## 执行流程
+
+### Step 1: 运行 Python 前置检查
 
 ```bash
 {engines_cmd} guard check --format json
 ```
 
-### Step 2: Load review context
+获取前置检查报告，包含：
 
-Read `.claude/rules/code-style.md` and `.claude/rules/safety.md`.
+| 字段 | 说明 |
+|------|------|
+| `boundary_violations` | 越界修改的文件列表（对比 Plan allowedFiles） |
+| `diff_stats` | 变更文件数/行数 + 是否超预算 |
+| `assertion_deletions` | 被删除的断言行 |
+| `test_skips_added` | 新增的 skip/ignore/only 标记 |
+| `secrets` | 疑似硬编码凭证 |
+| `lint_issues` | Lint/Format 问题汇总 |
 
-### Step 3: Review checklist
+### Step 2: 读取审查上下文
 
-Check each item:
-- **Plan compliance** — Did we change only allowed files?
-- **Diff budget** — Did we exceed maxFiles / maxLinesChanged?
-- **Style contract** — Does the code follow project conventions?
-- **Safety rules** — No test weakening, no permission bypass, no hardcoded secrets
-- **Anti-cheating** — No deleted assertions, no skipped tests, no mocked core logic
-- **Reuse** — Did we reuse existing patterns instead of creating new ones?
-- **Scope creep** — Any unrelated formatting or refactoring?
+- `git diff HEAD` — 完整的代码变更
+- Plan / Spec 文件 — `docs/spec/*.md` 和 `docs/plan/*.md`
+- 项目规则 — `.claude/rules/code-style.md`、`.claude/rules/safety.md`
+- 前置检查报告（Step 1 输出）
 
-### Step 4: Output review report
+### Step 3: 执行 6 维审查
 
-Report in Chinese:
-- Pass/Fail per category
-- Specific violations with file paths
-- Whether changes are ready to proceed
+按以下 6 个维度逐文件审查代码变更。每个维度判断通过/不通过，发现问题必须标注严重级别和具体位置。
 
-### Step 5: On failure
+---
 
-If violations found:
-- For minor style issues -- suggest fixes
-- For scope violations -- enter REPAIR to revert
-- For plan changes needed -- initiate Plan Change Request
+## 审查维度
 
-## Guardrails
+### 一、正确性与安全
 
-- Review against the PLAN, not against what looks "better"
-- Flag unrelated changes even if they look good
-- Present findings in Chinese
+> 代码逻辑正确吗？有没有安全风险？
+
+逐一检查：
+
+1. **空值与边界**
+   - 取值/调用前是否做了空判断？
+   - 数组越界、除零、空集合是否有防护？
+   - 可选参数/字段是否有默认值或空值处理？
+
+2. **异常处理**
+   - catch 块不能为空（空 catch 是 bug）
+   - 异常不能静默吞掉（至少记录日志）
+   - 错误信息是否包含足够的追踪上下文（traceId、关键参数）？
+   - 是否存在 `catch (e) { return null }` 这种掩盖问题的写法？
+
+3. **资源管理**
+   - 连接/文件句柄/定时器/事件监听器是否正确释放？
+   - 是否存在循环内创建连接、未关闭的资源？
+   - finally 块是否正确清理资源？
+
+4. **并发与事务**
+   - 事务边界是否正确？是否覆盖了所有相关操作？
+   - 是否存在竞态条件（check-then-act 模式）？
+   - 锁的范围是否合理？是否存在死锁风险？
+
+5. **输入校验**
+   - 是否做了充分的输入校验（类型/长度/范围/格式）？
+   - 前后端校验规则是否一致？
+   - 上传文件的类型/大小校验是否充分？
+
+6. **注入风险**
+   - SQL 拼接？命令拼接？模板注入？
+   - 路径遍历（文件上传、静态资源访问）？
+   - 是否存在 eval / exec / deserialize 等危险操作？
+
+7. **敏感数据**
+   - 日志/响应/错误消息是否泄露了密钥、token、密码、用户隐私？
+   - 错误页面是否暴露了堆栈信息或内部路径？
+   - 是否有完整的请求体/响应体被打印到日志？
+
+8. **鉴权与权限**
+   - 是否有未受保护的接口/路由？
+   - 权限校验是否被绕过（直接访问内部方法、参数篡改）？
+   - 是否存在越权风险（用户A能访问用户B的数据）？
+
+**判断标准：**
+- 发现安全漏洞（注入/鉴权旁路/密钥泄露）→ **Critical**
+- 发现逻辑错误（空值崩溃/事务缺失/资源泄漏）→ **Critical**
+- 异常处理缺失、校验不足 → **Important**
+
+---
+
+### 二、合约合规
+
+> 有没有按照 Plan 的约束来？
+
+逐一检查：
+
+1. **文件边界**
+   - 是否只修改了 Plan 中声明的 allowedFiles？
+   - 越界修改是否属于合理补充（如新增必要的 import）还是违规扩大？
+   - 建议：合理补充记录为 Minor，明显越界标记 Important
+
+2. **Diff 预算**
+   - 变更文件数/行数是否超出 maxFiles / maxLinesChanged？
+   - 是否引入了 Plan 不允许的新抽象/新依赖？
+   - 建议：超出预算但理由是合理的扩展 → Important；无理由超预算 → Critical
+
+3. **反作弊**
+   - 是否删除了已有测试断言？
+   - 是否新增了 skip / ignore / only 标记？
+   - 是否用 mock 替换了核心业务逻辑？
+   - 是否绕过了权限校验或 CI 门禁？
+   - **以上任何一条 → Critical**
+
+4. **Spec 覆盖**
+   - 每个验收标准（Acceptance Criteria）是否都有对应实现？
+   - 是否有验收标准被遗漏？
+   - 建议：遗漏 → Important
+
+5. **Plan 偏差**
+   - 是否存在 Plan 未声明的改动？
+   - 偏差是合理的工程判断还是不必要范围膨胀？
+   - 建议：合理偏差记录为 Minor，无理由膨胀 → Important
+
+**判断标准：**
+- 反作弊违规（删测试/弱化断言/跳过门禁）→ **Critical**
+- 越界修改、遗漏验收标准 → **Important**
+- 合理偏差、Minor 超额 → **Minor**
+
+---
+
+### 三、工程质量
+
+> 代码写得扎实吗？上线后能维护吗？
+
+逐一检查：
+
+1. **结构复杂度**
+   - 嵌套深度是否超过 3-4 层？
+   - 单个函数/方法是否过长（超过 80 行值得关注）？
+   - 回调嵌套是否超过 3 层？
+   - 模块边界是否清晰？
+
+2. **错误处理一致性**
+   - 是否与项目现有错误处理模式一致？
+   - 是否引入了新的异常类型/错误码风格？
+   - 异常是否被正确传播而非吞掉？
+
+3. **日志规范**
+   - 关键路径是否有日志（入口/出口/异常/慢操作）？
+   - 是否有 debug 日志残留（console.log / print / logger.debug）？
+   - 日志级别是否合理（error 用于需要告警的，info 用于关键流程）？
+   - 日志是否包含可追踪的信息（traceId / 关键参数）？
+
+4. **N+1 / 性能陷阱**
+   - 是否存在循环内数据库查询？
+   - 是否存在不必要的大对象创建？
+   - 是否缺少批量操作（本该批量查询却逐条查）？
+   - 是否存在同步阻塞 I/O 但场景需要异步？
+
+5. **无意义代码**
+   - 空 if-else 块
+   - 空 catch 块（同时也是一维的安全问题）
+   - 仅含日志/注释的代码块
+   - 注释掉的大段废弃代码
+
+6. **硬编码**
+   - 魔法数字（应提取为命名常量）
+   - 写死的配置值（URL、超时时间、阈值）
+   - Mock 数据残留在生产代码中
+
+7. **文档与可读性**
+   - 注释是否与代码实际行为一致？
+   - 关键业务逻辑是否有必要注释？
+   - 是否有注释掉的废弃代码（Git 可回溯，应删除）？
+   - 对外接口是否有基本的文档说明？
+
+**判断标准：**
+- N+1 查询、严重性能问题 → **Important**
+- 空 catch、硬编码生产配置 → **Important**
+- 嵌套过深、debug 日志残留、注释错误 → **Minor**
+
+---
+
+### 四、简洁与复用
+
+> 代码是不是最简方案？有没有重复造轮子？
+
+逐一检查：
+
+1. **DRY 原则**
+   - 是否有复制粘贴的相同/相似逻辑？
+   - 项目中是否已有可复用的实现（Util/Helper/Service 方法）？
+   - 如果存在可复用实现但没有用 → **Important**
+
+2. **过度设计**
+   - 是否为单次使用创建了不必要的抽象/接口/基类？
+   - 是否引入了不必要的"灵活性"（如为未来可能的需求预留配置）？
+   - 是否引入了一个简单的工具函数却包装成完整的类？
+   - 建议：过度抽象 → **Important**；不必要的灵活性 → **Minor**
+
+3. **未使用代码**
+   - 是否有未使用的 import？
+   - 是否有未使用的变量/函数/类型？
+   - 是否有自己改动造成的孤代码（旧 import 遗留下来）？
+   - 建议：死代码 → **Minor**
+
+4. **命名规范**
+   - 拼写是否正确？
+   - 是否中英文混用？
+   - 单复数是否清晰（列表用复数，单条用单数）？
+   - 动词/名词是否得当（函数用动词，变量用名词）？
+   - 是否与项目现有命名习惯一致？
+   - 建议：命名问题 → **Minor**
+
+5. **项目风格贴合**
+   - 是否遵循项目现有分层（Controller thin / Service 承载逻辑 / Repository 只做数据访问）？
+   - 返回值包装是否一致？
+   - 错误处理模式是否与项目统一？
+   - 是否引入了项目中不存在的代码风格？
+
+6. **无关修改**
+   - 是否存在与任务无关的格式化变更？
+   - 是否存在顺手优化的不相关代码？
+   - 是否存在大范围的不必要重构？
+   - 建议：无关修改 → **Important**（应该回退）
+
+**判断标准：**
+- 重复造轮子、过度抽象、无关修改 → **Important**
+- 命名不规范、死代码、不必要的灵活性 → **Minor**
+
+---
+
+### 五、验证质量
+
+> 测试和验证是否真正有效？
+
+逐一检查：
+
+1. **Scenario 绑定**
+   - 实现是否绑定了 Plan 中声明的 Scenario？
+   - 如果 Plan 声明了 Scenario 但代码中没有对应测试 → **Important**
+
+2. **断言有效性**
+   - 断言是否验证了真实业务行为？
+   - 是否存在 "assert true" / "expect(true).toBe(true)" 这类无意义断言？
+   - 是否存在全部 mock 掉依赖导致测试只验证 mock 本身？
+   - 建议：无意义断言 → **Important**
+
+3. **异常路径覆盖**
+   - 测试是否只覆盖了 Happy Path？
+   - 关键异常路径是否有对应测试（空输入/超时/权限拒绝/并发冲突）？
+   - 建议：异常路径缺失 → **Important**
+
+4. **测试独立性**
+   - 测试是否相互独立、可重复执行？
+   - 是否存在测试 A 依赖测试 B 的数据库状态？
+   - 是否清理了测试产生的数据？
+
+5. **测试数据**
+   - 是否使用了合理的测试数据？
+   - 测试是否依赖生产数据（危险）？
+   - Fixture 是否清晰、可维护？
+
+**判断标准：**
+- 无意义断言、Scenario 未绑定 → **Important**
+- 异常路径覆盖不足 → **Important**
+- 测试数据依赖问题 → **Minor**
+
+---
+
+### 六、兼容与可回滚
+
+> 上线后能不能安全退回来？
+
+逐一检查：
+
+1. **API 兼容性**
+   - 是否改变了接口签名（参数名/类型/必填变化）？
+   - 返回值结构是否变化（字段删除/类型改变）？
+   - HTTP 状态码是否变化？
+   - 下游调用方是否需要同步修改？
+   - 建议：破坏性 API 变更 → **Critical**
+
+2. **数据兼容性**
+   - 数据库字段变更是否兼容旧数据？
+   - Migration 是否有对应的 down/回滚脚本？
+   - 新增非空字段是否有默认值？
+   - 字段类型变更是否有数据迁移方案？
+   - 建议：无默认值的非空字段新增 → **Critical**；无 down 脚本 → **Important**
+
+3. **行为兼容性**
+   - 是否改变了已有功能的默认行为或边界语义？
+   - 是否改变了已有接口的返回内容/排序/过滤逻辑？
+   - 建议：行为变更 → **Important**（需明确文档说明）
+
+4. **配置兼容性**
+   - 是否依赖新的环境变量但未设置默认值？
+   - 新增配置项是否在所有环境都已配置？
+   - 建议：缺失默认值 → **Important**
+
+5. **不可逆操作**
+   - 是否有物理删除（而非软删除）？
+   - 是否有覆盖写（而非追加或版本化）？
+   - 是否有 DROP TABLE / DROP COLUMN 等不可逆 DDL？
+   - 建议：不可逆操作 → **Critical**（必须有备份/确认方案）
+
+6. **回滚方案**
+   - 高风险变更是否有明确的回滚步骤？
+   - 回滚后数据是否能恢复一致状态？
+   - 建议：无回滚方案 → **Important**
+
+**判断标准：**
+- 破坏性 API 变更、不可逆操作、无默认值非空字段 → **Critical**
+- 行为变更、无 down 脚本、无回滚方案 → **Important**
+- 配置缺默认值 → **Important**
+
+---
+
+## 问题严重级别
+
+| 级别 | 定义 | 示例 |
+|------|------|------|
+| **Critical** | 安全漏洞、数据丢失、不可逆破坏、功能完全错误 | SQL 注入、鉴权旁路、密钥泄露、破坏性 API 变更、删测试 |
+| **Important** | 越界修改、遗漏验收标准、架构问题、测试缺失 | N+1 查询、过度抽象、异常路径未覆盖、无 down 脚本 |
+| **Minor** | 命名不规范、注释不准确、轻微重复、风格偏差 | debug 日志残留、死代码、注释错误 |
+
+---
+
+## 审查报告输出格式
+
+审查完成后输出以下格式的报告：
+
+```markdown
+## Review Report
+
+**审查范围：** `<branch or diff range>` (N files, +X -Y lines)
+**Plan 绑定：** `<plan-id>`
+**前置检查：** ✅/❌ guard / ✅/❌ lint / ✅/❌ secrets
+
+---
+
+### 一、正确性与安全 ✅/⚠️/❌
+
+- **[Critical/Important/Minor]** `file:line`
+  问题描述
+  建议：修复方案
+
+（无问题时标注 ✅ 无问题）
+
+### 二、合约合规 ✅/⚠️/❌
+
+（同上格式）
+
+### 三、工程质量 ✅/⚠️/❌
+
+（同上格式）
+
+### 四、简洁与复用 ✅/⚠️/❌
+
+（同上格式）
+
+### 五、验证质量 ✅/⚠️/❌
+
+（同上格式）
+
+### 六、兼容与可回滚 ✅/⚠️/❌
+
+（同上格式）
+
+---
+
+### 结论
+
+**状态：✅ 通过 / ⚠️ 通过（有 Minor 问题）/ ❌ 不通过**
+
+- Critical: N
+- Important: N
+- Minor: N
+
+**下一步：** 进入 VERIFY / 进入 REPAIR / 其他
+```
+
+---
+
+## Step 4: 根据审查结果决定下一步
+
+### 通过（无 Critical / Important 问题）
+
+- Minor 问题记录但不阻塞
+- 输出审查报告
+- Loop 内 → 进入 VERIFY 阶段
+- 独立触发 → 告知用户审查通过
+
+### 不通过（有 Critical / Important 问题）
+
+- 输出审查报告，标注所有问题
+- Loop 内 → Python 状态机自动进入 REPAIR → 修复后重新 REVIEW
+- 独立触发 → 询问用户是否让 AI 修复
+- 超过 3 轮 REPAIR → 升级给用户，人工决策
+
+### REPAIR 阶段规则
+
+修复时遵守：
+- 分析每个问题的根因
+- 最小修复：每处修复不超过 30 行变更
+- 不修改 Scenario 定义文件
+- 不删除已有测试断言
+- 修复后确认测试仍然通过
+- 如果修复会引入更大风险 → 标记为需人工决策
+
+---
+
+## 禁止行为
+
+- 不审查超出 git diff 范围的文件
+- 不因为"可以写得更好"而要求重写（只标记真正的问题）
+- 不输出模糊建议（"改进错误处理"→ 必须指明具体文件和行号）
+- 不将 Minor 问题标记为 Critical
+- 不说"看起来不错"而没有逐维检查
+- 不修改 Scenario 定义来让错误代码通过
+- 审查结果始终用中文呈现

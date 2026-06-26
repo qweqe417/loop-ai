@@ -1,0 +1,101 @@
+# MCP Server 注册表 —— 随插件发布，用户可扩展
+# 新增中间件只加一条记录，不改 Python 代码
+# package: npm 包名，command 固定 npx
+# env: 连接参数，用户只需改 IP/端口/账号/密码
+# keywords: 扫描配置文件时匹配的关键字（大小写不敏感）
+version: 1
+servers:
+  mysql:
+    package: "@anthropic/mcp-mysql"
+    description: "MySQL 数据库访问"
+    env:
+      MYSQL_HOST:     { label: "主机", default: "localhost" }
+      MYSQL_PORT:     { label: "端口", default: "3306" }
+      MYSQL_USER:     { label: "用户名", default: "root" }
+      MYSQL_PASSWORD: { label: "密码", default: "" }
+      MYSQL_DATABASE: { label: "数据库", default: "test" }
+    keywords: ["mysql", "jdbc:mysql"]
+    instructions: |
+      ### MySQL 数据库访问
+      本项目检测到 MySQL。AI 可通过 MCP 直接查询和验证数据。
+      **禁止**: 操作生产环境、执行 DDL/DROP/TRUNCATE。
+
+  redis:
+    package: "@anthropic/mcp-redis"
+    description: "Redis 缓存访问"
+    env:
+      REDIS_HOST:     { label: "主机", default: "localhost" }
+      REDIS_PORT:     { label: "端口", default: "6379" }
+      REDIS_PASSWORD: { label: "密码", default: "" }
+    keywords: ["redis", "jedis", "spring.data.redis"]
+    instructions: |
+      ### Redis 缓存访问
+      本项目检测到 Redis。AI 可通过 MCP 读取和验证缓存状态。
+      **禁止**: 操作生产环境、FLUSHDB/FLUSHALL。
+
+  postgres:
+    package: "@anthropic/mcp-postgres"
+    description: "PostgreSQL 数据库访问"
+    env:
+      PG_HOST:        { label: "主机", default: "localhost" }
+      PG_PORT:        { label: "端口", default: "5432" }
+      PG_USER:        { label: "用户名", default: "postgres" }
+      PG_PASSWORD:    { label: "密码", default: "" }
+      PG_DATABASE:    { label: "数据库", default: "postgres" }
+    keywords: ["postgresql", "postgres", "jdbc:postgresql"]
+    instructions: |
+      ### PostgreSQL 数据库访问
+      本项目检测到 PostgreSQL。AI 可通过 MCP 直接查询和验证数据。
+      **禁止**: 操作生产环境、执行 DDL/DROP/TRUNCATE。
+
+  kafka:
+    package: "@anthropic/mcp-kafka"
+    description: "Kafka 消息队列访问"
+    env:
+      KAFKA_BROKERS:  { label: "Broker 地址", default: "localhost:9092" }
+    keywords: ["kafka", "spring.kafka"]
+    instructions: |
+      ### Kafka 消息队列访问
+      本项目检测到 Kafka。AI 可通过 MCP 消费和验证消息。
+      **禁止**: 操作生产环境、删除 topic。
+
+  elasticsearch:
+    package: "@anthropic/mcp-elasticsearch"
+    description: "Elasticsearch 搜索引擎访问"
+    env:
+      ES_HOST:        { label: "主机", default: "localhost" }
+      ES_PORT:        { label: "端口", default: "9200" }
+    keywords: ["elasticsearch", "spring.elasticsearch"]
+    instructions: |
+      ### Elasticsearch 搜索引擎访问
+      本项目检测到 Elasticsearch。AI 可通过 MCP 查询和验证搜索数据。
+      **禁止**: 操作生产环境、删除索引。
+
+  mongodb:
+    package: "@anthropic/mcp-mongodb"
+    description: "MongoDB 数据库访问"
+    env:
+      MONGO_HOST:     { label: "主机", default: "localhost" }
+      MONGO_PORT:     { label: "端口", default: "27017" }
+      MONGO_USER:     { label: "用户名", default: "" }
+      MONGO_PASSWORD: { label: "密码", default: "" }
+      MONGO_DATABASE: { label: "数据库", default: "test" }
+    keywords: ["mongodb", "mongo", "spring.data.mongodb"]
+    instructions: |
+      ### MongoDB 数据库访问
+      本项目检测到 MongoDB。AI 可通过 MCP 直接查询和验证数据。
+      **禁止**: 操作生产环境、drop 集合。
+
+  rabbitmq:
+    package: "@anthropic/mcp-rabbitmq"
+    description: "RabbitMQ 消息队列访问"
+    env:
+      RABBITMQ_HOST:      { label: "主机", default: "localhost" }
+      RABBITMQ_PORT:      { label: "端口", default: "5672" }
+      RABBITMQ_USER:      { label: "用户名", default: "guest" }
+      RABBITMQ_PASSWORD:  { label: "密码", default: "guest" }
+    keywords: ["rabbitmq", "spring.rabbitmq"]
+    instructions: |
+      ### RabbitMQ 消息队列访问
+      本项目检测到 RabbitMQ。AI 可通过 MCP 消费和验证消息。
+      **禁止**: 操作生产环境、删除 queue/exchange。

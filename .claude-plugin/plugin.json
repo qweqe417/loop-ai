@@ -8,7 +8,6 @@
   "homepage": "https://github.com/qweqe417/loop-ai",
   "repository": "https://github.com/qweqe417/loop-ai",
   "license": "MIT",
-  "hooks": "./hooks/hooks.json",
   "keywords": [
     "ai-coding",
     "loop-engineering",

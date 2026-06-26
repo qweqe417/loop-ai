@@ -5,15 +5,21 @@
 完全不感知自己在哪个 AI 工具中运行。
 """
 
+# 启用延迟注解求值
 from __future__ import annotations
 
+# 导入 ABC 抽象基类和 abstractmethod 装饰器
 from abc import ABC, abstractmethod
+# 导入 dataclass 和 field 用于定义数据类
 from dataclasses import dataclass, field
+# 导入 Path 用于文件路径操作
 from pathlib import Path
 
+# 从 adapters.base 导入 McpServerDef 数据类（Provider 声明 MCP 需求时使用）
 from engines.adapters.base import McpServerDef
 
 
+# Provider 抽象基类：外部能力声明，完全工具无关
 class ProviderManifest(ABC):
     """Provider 抽象基类 —— 外部能力声明，完全工具无关。
 
@@ -60,6 +66,9 @@ class ProviderManifest(ABC):
 
     # ── 检测 ──
 
+    # 检测此 Provider 是否已安装/可用
+    # 参数 project_root: 项目根目录
+    # 返回值: True 表示已安装或配置已就绪
     @abstractmethod
     def detect(self, project_root: Path) -> bool:
         """检测此 Provider 是否已安装/可用。
@@ -74,6 +83,8 @@ class ProviderManifest(ABC):
 
     # ── Skill 模板（内容由 ToolAdapter 渲染） ──
 
+    # 返回 skill/rule 模板字典
+    # 返回值: {逻辑名: 模板内容} 字典
     @abstractmethod
     def get_skill_templates(self) -> dict[str, str]:
         """返回 {逻辑名: 模板内容} 的 skill/rule 模板。
@@ -91,6 +102,8 @@ class ProviderManifest(ABC):
 
     # ── 主配置注入 ──
 
+    # 返回在主配置文件中注入的段落
+    # 返回值: 告诉 AI 这个 Provider 是什么、怎么调用的说明文本
     @abstractmethod
     def get_ai_instructions(self) -> str:
         """在主配置文件（CLAUDE.md 等）中注入的段落。
@@ -102,6 +115,8 @@ class ProviderManifest(ABC):
 
     # ── MCP 需求 ──
 
+    # 返回此 Provider 需要的 MCP Server 列表
+    # 返回值: McpServerDef 实例列表
     @abstractmethod
     def get_mcp_servers(self) -> list[McpServerDef]:
         """此 Provider 需要的 MCP Server 列表。
@@ -113,6 +128,8 @@ class ProviderManifest(ABC):
 
     # ── Hook 需求 ──
 
+    # 返回此 Provider 需要的 hook 定义
+    # 返回值: hook 定义字典
     @abstractmethod
     def get_hooks(self) -> dict[str, Any]:
         """此 Provider 需要的 hook 定义。
@@ -130,5 +147,6 @@ class ProviderManifest(ABC):
 
     # ── 工具方法 ──
 
+    # 返回 Provider 的字符串表示
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} name={self.name}>"

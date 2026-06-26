@@ -1,0 +1,79 @@
+{
+  "task_id": "cli-1782355568",
+  "project": "loop",
+  "project_root": "D:\\ruanjian\\repository\\geren\\loop\\loop",
+  "current_stage": "completed",
+  "task_intake": {
+    "input_type": "plain_prompt",
+    "complexity": "medium",
+    "risk_level": "L3",
+    "flow_mode": "direct",
+    "estimated_stages": [],
+    "needs_spec": true,
+    "needs_plan": true,
+    "verification_required": true,
+    "guard_level": "normal",
+    "reason": "test"
+  },
+  "pending_action": "",
+  "pending_prompt": {},
+  "needs_ai_input": false,
+  "spec_entry": null,
+  "spec_quality_report": null,
+  "brainstorm_result": null,
+  "plan_contracts": [],
+  "plan_lock_state": "unlocked",
+  "plan_quality_report": null,
+  "daemon_mode": false,
+  "context_budget_max": 8000,
+  "context_budget_used": 0,
+  "task_state": {
+    "status": "pending",
+    "stage": "gate",
+    "plan_compliance": null,
+    "verification": {
+      "status": "unverified",
+      "summary": "",
+      "sanity_check_passed": false,
+      "test_output": "",
+      "total_assertions": 0,
+      "passed_assertions": 0,
+      "coverage": {}
+    },
+    "retry_count": 0,
+    "notes": [
+      "[GATE] Layer1: 7/7 passed, blocked=False",
+      "[GATE] PASSED — 0 warnings"
+    ],
+    "current_task_index": 0,
+    "task_logs": [],
+    "started_at": null,
+    "completed_at": null,
+    "metadata": {}
+  },
+  "verification": {
+    "status": "unverified",
+    "summary": "",
+    "sanity_check_passed": false,
+    "test_output": "",
+    "total_assertions": 0,
+    "passed_assertions": 0,
+    "coverage": {}
+  },
+  "scenario_results": [],
+  "checkpoints": [],
+  "decision": null,
+  "failures": [],
+  "created_at": "2026-06-25T10:46:08.721492",
+  "updated_at": "2026-06-25T10:46:09.334342",
+  "confirmed_actions": [],
+  "metadata": {
+    "user_input": "test",
+    "args_task": "test",
+    "sub_loop_mode": "gate",
+    "gate_report": {
+      "violations": [],
+      "warnings": []
+    }
+  }
+}

@@ -4,16 +4,18 @@
 支持完整循环和子循环（test-only / dev-only / spec-only 等独立能力）。
 """
 
+# 从 daemon 模块导入守护进程类
 from .daemon import LoopDaemon
-from .git_sync import GitSyncer, SyncResult
+# 从 loop_runner 模块导入核心循环引擎及相关工厂函数
 from .loop_runner import (
     LoopRunner,
     SUB_LOOP_PRESETS,
     create_sub_loop,
     list_sub_loops,
 )
+# 从 direct_executor 模块导入快速执行器
 from .direct_executor import DirectExecutor
-from .worktree_isolator import WorktreeIsolator, WorktreeResult
+# 从 stage_handlers 模块导入阶段处理器、流转定义和工具函数
 from .stage_handlers import (
     DEFAULT_FLOW,
     DIRECT_STAGES,
@@ -33,13 +35,9 @@ from .stage_handlers import (
     next_stage,
 )
 
+# 模块公开接口列表
 __all__ = [
-    # Git 同步
-    "GitSyncer",
-    "SyncResult",
-    # 隔离与守护
-    "WorktreeIsolator",
-    "WorktreeResult",
+    # 守护
     "LoopDaemon",
     # 引擎
     "LoopRunner",

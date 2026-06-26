@@ -4,17 +4,24 @@
 职责：工具原生文件路径、命令格式、MCP 配置格式、模板变量渲染。
 """
 
+# 启用延迟注解求值，允许前向引用类型
 from __future__ import annotations
 
+# 导入 ABC 抽象基类和 abstractmethod 装饰器，用于定义抽象方法
 from abc import ABC, abstractmethod
+# 导入 dataclass 和 field 用于定义数据类
 from dataclasses import dataclass, field
+# 导入 Path 用于文件路径操作
 from pathlib import Path
+# 导入 TYPE_CHECKING 用于类型检查时的条件导入，避免循环导入
 from typing import TYPE_CHECKING, Any
 
+# 仅类型检查时导入 ProjectProfile，避免运行时循环导入
 if TYPE_CHECKING:
     from engines.init.models import ProjectProfile
 
 
+# MCP Server 定义数据类：完全工具无关的 MCP 服务器描述
 @dataclass
 class McpServerDef:
     """MCP Server 定义 —— 完全工具无关。
@@ -22,14 +29,23 @@ class McpServerDef:
     ToolAdapter 负责翻译成具体工具的 MCP 配置格式。
     """
 
+    # MCP 服务器名称
     name: str
+    # 服务器描述
     description: str = ""
+    # 启动命令，默认使用 npx
     command: str = "npx"
+    # 命令行参数列表
     args: list[str] = field(default_factory=list)
+    # 环境变量字典
     env: dict[str, str] = field(default_factory=dict)
+    # 环境变量元数据：key -> {label, default}，供 CLI/UI 引导用户配置
+    env_meta: dict[str, dict[str, str]] = field(default_factory=dict)
+    # 是否为必需服务器
     required: bool = False
 
 
+# AI 工具适配器抽象基类
 class ToolAdapter(ABC):
     """AI 工具适配器抽象基类。
 
@@ -139,12 +155,16 @@ class ToolAdapter(ABC):
 
     # ── 模板渲染 ──
 
+    # 把 Provider 模板渲染成当前工具可用的 skill/rule 文件内容
+    # 参数 template: 包含占位符 {key} 的模板字符串
+    # 返回值: 替换占位符后的渲染结果
     def render_skill(self, template: str) -> str:
         """把 Provider 模板渲染成当前工具可用的 skill/rule 文件内容。
 
         替换 {key} 为 self.template_vars[key]。
         """
         result = template
+        # 遍历所有模板变量，将 {key} 占位符替换为实际值
         for key, val in self.template_vars.items():
             result = result.replace(f"{{{key}}}", val)
         return result
@@ -189,6 +209,32 @@ class ToolAdapter(ABC):
 
     # ── 安装 ──
 
+    @staticmethod
+    def default_loop_config() -> dict[str, Any]:
+        """返回 loop-config.json 的默认值。
+
+        各 adapter 的 install() 调用此方法获取基础配置，
+        再叠加 target_tool + template_vars。
+
+        注意：services 不写死启动命令，ServiceManager 会自动检测。
+        用户只在自动检测不准确时才需手动配。
+        """
+        return {
+            # ── 鉴权 ──
+            "auth": {
+                "token": "粘贴你的JWT token到这里",
+            },
+            # ── 服务启停（可选，不配则 ServiceManager 自动检测）──
+            # "services": [
+            #     {
+            #         "name": "app",
+            #         "start": "mvn spring-boot:run",
+            #         "health": "http://localhost:8080/actuator/health",
+            #         "startup_timeout": 90,
+            #     },
+            # ],
+        }
+
     @abstractmethod
     def install(
         self,
@@ -204,40 +250,64 @@ class ToolAdapter(ABC):
 
     # ── 已有文件检测 ──
 
-    def get_existing_file_patterns(self) -> list[str]:
+    # 子类覆写：无需实例化的文件模式列表（类级别常量）
+    _file_patterns: list[str] = []
+
+    # 类方法：返回需要检测是否已存在的文件/目录模式列表
+    # 用于 init 阶段的冲突检测
+    @classmethod
+    def get_existing_file_patterns(cls) -> list[str]:
         """返回需要检测是否已存在的文件/目录模式列表。
 
-        用于 init 阶段的冲突检测。
+        用于 init 阶段的冲突检测。优先使用 _file_patterns 类属性。
         """
-        return [self.main_config_path, self.rules_dir]
+        # 如果子类定义了 _file_patterns，直接返回
+        if cls._file_patterns:
+            return cls._file_patterns
+        # 否则抛出未实现错误
+        raise NotImplementedError(f"{cls.__name__} must define _file_patterns")
 
     # ── 共享工具方法 ──
 
+    # 静态方法：向 lines 列表追加语言特定的规则（工具无关）
+    # 参数 lines: 要追加到的行列表
+    # 参数 profile: 项目配置信息，需包含 language 属性
     @staticmethod
     def _append_language_rules(lines: list[str], profile: Any) -> None:
         """向 lines 列表追加语言特定的规则（工具无关）。"""
+        # 获取项目语言类型
         lang = getattr(profile, "language", "")
+        # Python 项目的特定规则
         if lang == "python":
             lines.append("- 使用 pydantic v2 风格（model_validate 而非 dict()）")
             lines.append("- 异常使用项目统一异常类，不裸 raise")
             lines.append("- 遵循现有项目分层，不引入新的依赖模式")
+        # Java 项目的特定规则
         elif lang == "java":
             lines.append("- 遵循现有 Controller/Service/Repository 分层")
             lines.append("- 异常使用 @ExceptionHandler 或项目统一异常处理")
             lines.append("- 测试使用 JUnit，不引入新的测试框架")
+        # TypeScript/JavaScript 项目的特定规则
         elif lang in ("typescript", "javascript"):
             lines.append("- 遵循现有组件结构和命名约定")
             lines.append("- 使用项目的 ESLint/Prettier 配置")
             lines.append("- 测试使用项目已有测试框架")
 
+    # 静态方法：复制文件，目标已存在时返回 False
+    # 参数 src: 源文件路径
+    # 参数 dst: 目标文件路径
+    # 返回值: True 表示复制成功，False 表示目标已存在或复制失败
     @staticmethod
     def _copy_file(src: Path, dst: Path) -> bool:
         """复制文件，目标已存在时返回 False。"""
         import shutil
         try:
+            # 目标已存在则跳过
             if dst.exists():
                 return False
+            # 确保目标目录存在
             dst.parent.mkdir(parents=True, exist_ok=True)
+            # 复制文件（保留元数据）
             shutil.copy2(src, dst)
             return True
         except Exception:
@@ -245,6 +315,9 @@ class ToolAdapter(ABC):
 
     # ── 共享渲染方法 ──────────────────────────────────────
 
+    # 静态方法：生成规则文件的引导 prompt
+    # 参数 rules_dir: 规则文件目录路径
+    # 返回值: 引导 AI 提取规则的 prompt 字符串
     @staticmethod
     def _render_rules_prompt(rules_dir: str) -> str:
         """生成规则文件的引导 prompt —— 引导 AI 从实际代码提取规则。"""
@@ -270,6 +343,13 @@ class ToolAdapter(ABC):
             "- 修改边界：哪些模块可以改、哪些是外部接口不能动",
         ])
 
+    # 静态方法：生成自举引导文件 —— Python 只写这个 prompt，AI 负责生成所有配置
+    # 参数 project_name: 项目名称
+    # 参数 tool_display_name: 工具显示名
+    # 参数 main_config_path: 主配置文件路径
+    # 参数 rules_dir: 规则文件目录
+    # 参数 command_prefix: 命令前缀
+    # 返回值: 自举引导 prompt 字符串
     @staticmethod
     def _render_bootstrap_prompt(
         project_name: str,
@@ -284,6 +364,7 @@ class ToolAdapter(ABC):
         所以 prompt 必须引导 AI 从实际代码中提取信息，写出精准、可操作、
         项目特有的配置。
         """
+        # 生成规则文件 prompt 部分
         rules_section = ToolAdapter._render_rules_prompt(rules_dir)
         return "\n".join([
             f"# {project_name}",
@@ -367,3 +448,30 @@ class ToolAdapter(ABC):
             "> 初始化完成后本引导内容可删除。",
         ])
 
+    # ── 共享工具方法 ──────────────────────────────────────────
+
+    # 静态方法：深度合并 hooks 配置：同事件追加 handler，不删除已有的
+    # 参数 existing: 已有的 hooks 配置字典
+    # 参数 new: 新的 hooks 配置字典
+    # 返回值: 合并后的 hooks 配置字典
+    @staticmethod
+    def _deep_merge_hooks(existing: dict, new: dict) -> dict:
+        """深度合并 hooks 配置：同事件追加 handler，不删已有。"""
+        # 如果没有已有配置，直接返回新配置的副本
+        if not existing:
+            return dict(new)
+        # 如果没有新配置，直接返回已有配置的副本
+        if not new:
+            return dict(existing)
+        # 复制已有配置作为基础
+        merged = dict(existing)
+        # 遍历新配置中的每个事件
+        for event, handlers in new.items():
+            # 如果事件不存在，初始化为空列表
+            if event not in merged:
+                merged[event] = []
+            # 追加不重复的 handler
+            for h in handlers:
+                if h not in merged[event]:
+                    merged[event].append(h)
+        return merged

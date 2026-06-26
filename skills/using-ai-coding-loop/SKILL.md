@@ -36,9 +36,8 @@ Use the `Skill` tool with plugin name `ai-coding-loop`:
 | Plan | `ai-coding-loop:aicode-plan` | 生成实现方案 |
 | Full | `ai-coding-loop:aicode-full` | 完整 8 阶段开发流程 |
 | Dev | `ai-coding-loop:aicode-dev` | 已有 Spec/Plan 的开发模式 |
-| Test | `ai-coding-loop:aicode-test` | 仅验证 + 修复循环 |
+| Verify | `ai-coding-loop:aicode-verify` | 场景验证（--auto-fix 自动修复循环） |
 | Direct | `ai-coding-loop:aicode-direct` | 小改动的快速通道 |
-| Verify | `ai-coding-loop:aicode-verify` | 场景验证，执行断言并输出报告 |
 | Review | `ai-coding-loop:aicode-review` | 代码审查 |
 | Memory | `ai-coding-loop:aicode-memory` | 项目经验持久化 |
 
@@ -73,7 +72,6 @@ INTAKE → SPEC → PLAN → EXECUTE → VERIFY → REPAIR → REVIEW → MEMORY
 | `/aicode-plan` | `Skill: ai-coding-loop:aicode-plan` |
 | `/aicode-full` | `Skill: ai-coding-loop:aicode-full` |
 | `/aicode-dev` | `Skill: ai-coding-loop:aicode-dev` |
-| `/aicode-test` | `Skill: ai-coding-loop:aicode-test` |
 | `/aicode-direct` | `Skill: ai-coding-loop:aicode-direct` |
 | `/aicode-verify` | `Skill: ai-coding-loop:aicode-verify` |
 | `/aicode-review` | `Skill: ai-coding-loop:aicode-review` |

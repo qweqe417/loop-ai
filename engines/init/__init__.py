@@ -8,6 +8,7 @@
 目标工具通过 --target 参数选择（claude_code / codex / cursor）。
 """
 
+# 导入项目画像数据模型
 from .models import (
     CodeStyleProfile,
     InitReport,
@@ -17,10 +18,14 @@ from .models import (
     ScanResult,
     ScannedDirectory,
 )
+# 导入项目扫描器
 from .scanner import ProjectScanner
+# 导入文件生成器
 from .generator import FileGenerator
+# 导入初始化流程编排器和工具适配器辅助函数
 from .init_runner import InitRunner, get_adapter, get_available_tools
 
+# 公开的 API 列表
 __all__ = [
     # 编排器
     "InitRunner",

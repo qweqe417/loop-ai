@@ -4,22 +4,32 @@
 并在完成后设置 RunState.decision 决定下一步流转。
 """
 
+# 启用 Python 3.10+ 的延迟注解求值特性
 from __future__ import annotations
 
+# 导入日志模块，用于记录阶段处理过程
 import logging
+# 导入 ABC（抽象基类）和 abstractmethod（抽象方法装饰器）
 from abc import ABC, abstractmethod
+# 导入 TYPE_CHECKING 常量，用于类型注解的条件导入
 from typing import TYPE_CHECKING
 
+# 导入状态枚举类型：LoopAction（循环动作）、StageType（阶段类型）、VerificationStatus（验证状态）
 from engines.state.enums import LoopAction, StageType, VerificationStatus
 
+# 仅在类型检查时导入 RunState，避免循环导入
 if TYPE_CHECKING:
     from engines.state.models import RunState
 
+# 获取当前模块的日志记录器
 logger = logging.getLogger(__name__)
 
 # ── 阶段流转默认顺序 ──────────────────────────────────────────────
 
 # 每个阶段完成后默认进入的下一个阶段（handler 可通过 decision 覆盖）
+# None 表示流程终点
+# 默认阶段流转表：定义每个阶段完成后的默认下一阶段
+# None 表示流程终点
 DEFAULT_FLOW: dict[StageType, StageType | None] = {
     StageType.INTAKE:         StageType.SPEC,
     StageType.SPEC:           StageType.PLAN,
@@ -48,7 +58,7 @@ STANDARD_STAGES: list[StageType] = [
     StageType.MEMORY,
 ]
 
-# Direct Mode 跳过 SPEC/PLAN/TEST_DESIGN
+# Direct Mode 跳过 SPEC/PLAN/TEST_DESIGN，使用更短的阶段列表
 DIRECT_STAGES: list[StageType] = [
     StageType.INTAKE,
     StageType.DIRECT_EXECUTE,
@@ -58,12 +68,26 @@ DIRECT_STAGES: list[StageType] = [
 
 
 def next_stage(current: StageType) -> StageType | None:
-    """返回当前阶段默认的下一个阶段，不覆盖 handler 决策。"""
+    """返回当前阶段默认的下一个阶段，不覆盖 handler 决策。
+
+    Args:
+        current: 当前阶段类型
+
+    Returns:
+        StageType | None: 下一阶段，None 表示流程终点
+    """
     return DEFAULT_FLOW.get(current)
 
 
 def is_terminal(stage: StageType) -> bool:
-    """判断是否为终端阶段（不再流转）。"""
+    """判断是否为终端阶段（不再流转）。
+
+    Args:
+        stage: 阶段类型
+
+    Returns:
+        bool: 是否为终端阶段
+    """
     return DEFAULT_FLOW.get(stage) is None
 
 
@@ -79,15 +103,32 @@ class StageHandler(ABC):
     4. 可选创建 Checkpoint
     """
 
+    # 阶段类型标识，由子类覆盖
     stage: StageType
 
     @abstractmethod
     def handle(self, state: RunState) -> RunState:
-        """处理当前阶段，返回更新后的 RunState。"""
+        """处理当前阶段，返回更新后的 RunState。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         ...
 
     def _advance_to(self, state: RunState, target: StageType, reason: str = "") -> RunState:
-        """便捷方法：设置决策为进入指定阶段。"""
+        """便捷方法：设置决策为进入指定阶段。
+
+        Args:
+            state: 当前运行状态
+            target: 目标阶段
+            reason: 进入原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         from engines.state.models import LoopDecision
 
         state.decision = LoopDecision(
@@ -104,6 +145,13 @@ class StageHandler(ABC):
         不设置 decision，runner 按 flow table 流转。
 
         _advance_to() 只在需要覆盖 flow table 时使用（如路由决策、修复跳转）。
+
+        Args:
+            state: 当前运行状态
+            reason: 完成原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
         """
         # 不设置 decision。runner 在 _apply_decision 中检测到 decision=None
         # 时会使用 flow table 决定下一阶段。
@@ -117,6 +165,14 @@ class StageHandler(ABC):
         - Intake 根据 flow_mode 分流到 SPEC 或 DIRECT_EXECUTE
         - Verify 失败时跳转到 REPAIR
         - 其他需要偏离默认流转的场景
+
+        Args:
+            state: 当前运行状态
+            target: 目标阶段
+            reason: 跳转原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
         """
         from engines.state.models import LoopDecision
 
@@ -128,7 +184,15 @@ class StageHandler(ABC):
         return state
 
     def _retry(self, state: RunState, reason: str) -> RunState:
-        """设置决策为重试当前阶段。"""
+        """设置决策为重试当前阶段。
+
+        Args:
+            state: 当前运行状态
+            reason: 重试原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         from engines.state.models import LoopDecision
 
         state.decision = LoopDecision(
@@ -136,11 +200,20 @@ class StageHandler(ABC):
             target_stage=self.stage,
             reason=reason,
         )
+        # 增加重试计数
         state.task_state.retry_count += 1
         return state
 
     def _stop_success(self, state: RunState, reason: str = "") -> RunState:
-        """设置决策为成功终止。"""
+        """设置决策为成功终止。
+
+        Args:
+            state: 当前运行状态
+            reason: 成功原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         from engines.state.models import LoopDecision
 
         state.decision = LoopDecision(
@@ -151,7 +224,15 @@ class StageHandler(ABC):
         return state
 
     def _stop_failure(self, state: RunState, reason: str) -> RunState:
-        """设置决策为失败终止。"""
+        """设置决策为失败终止。
+
+        Args:
+            state: 当前运行状态
+            reason: 失败原因说明
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         from engines.state.models import LoopDecision
 
         state.decision = LoopDecision(
@@ -179,11 +260,13 @@ class StageHandler(ABC):
         projected = current + estimated_tokens
 
         if projected > budget_max * 0.9:
+            # 使用超过 90%，发出警告
             state.task_state.notes.append(
                 f"[BUDGET WARN] 上下文预算紧张: {projected}/{budget_max} tokens "
                 f"(本次 +{estimated_tokens})"
             )
         if projected > budget_max:
+            # 超出预算，记录严重警告
             state.task_state.notes.append(
                 f"[BUDGET CRITICAL] 上下文预算超出: {projected}/{budget_max} tokens, "
                 "建议简化上下文或拆分为更小的子任务"
@@ -192,54 +275,30 @@ class StageHandler(ABC):
         return True
 
     def _track_context_usage(self, state: RunState, tokens_used: int) -> None:
-        """跟踪上下文 token 使用量。"""
+        """跟踪上下文 token 使用量。
+
+        Args:
+            state: 当前 RunState
+            tokens_used: 本次使用的 token 数
+        """
         state.context_budget_used = (state.context_budget_used or 0) + tokens_used
 
     def _load_preflight_warnings(self, state: RunState) -> list[str]:
-        """从项目记忆加载编码前反模式提示。
-
-        召回 PITFALL / PROHIBITED / FAILURE_PATTERN 类记忆，
-        优先加载 entries/{id}.md 正文以获得更详细的反模式说明。
-        限制 2 条，每条 ≤ 120 字符。
-        """
-        warnings: list[str] = []
-        try:
-            from pathlib import Path
-            from engines.memory import MemoryCategory
-            from engines.memory.store import MemoryStore
-
-            project_root = Path(state.project_root) if state.project_root else Path.cwd()
-            store = MemoryStore(project_root=project_root)
-            entries = store.recall_by_category(
-                [MemoryCategory.PITFALL, MemoryCategory.PROHIBITED,
-                 MemoryCategory.FAILURE_PATTERN],
-                limit=3,
-            )
-            for e in entries:
-                # 尝试加载 entry 正文以获得更多细节
-                body = store.load_entry(e.id)
-                if body and body.content and len(body.content) > len(e.title):
-                    detail = body.content  # 来自 entries/{id}.md 的详细内容
-                else:
-                    detail = e.content or e.title  # fallback 到索引摘要
-
-                if len(detail) > 120:
-                    detail = detail[:120] + "..."
-                tag = e.tags[0] if e.tags else "注意"
-                warnings.append(f"[{tag}] {detail}")
-
-            if warnings:
-                logger.info("Preflight: loaded %d warning(s) from memory", len(warnings))
-        except Exception as exc:
-            logger.debug("Preflight warnings unavailable: %s", exc)
-
-        return warnings[:2]
+        """loop-memory 已通过 .claude/rules/ 自动加载，无需 Python 召回。"""
+        return []
 
     def _load_specification(self, state: RunState, task_id: str = "") -> dict:
         """定位 Spec/Plan 文件路径 + 简要摘要（供 superpowers 子Agent 读取）。
 
         superpowers:subagent-driven-development 内部自己读 plan/spec 文件，
         这里只提供路径引用，不注入全文（避免冗余 token）。
+
+        Args:
+            state: 当前 RunState
+            task_id: 任务 ID
+
+        Returns:
+            dict: 包含 spec_path, plan_path, spec_summary, plan_summary 的字典
         """
         result: dict = {"spec_path": "", "plan_path": "", "spec_summary": "", "plan_summary": ""}
 
@@ -297,6 +356,14 @@ class IntakeHandler(StageHandler):
     stage = StageType.INTAKE
 
     def handle(self, state: RunState) -> RunState:
+        """处理 INTAKE 阶段：根据风险等级和 flow_mode 决定下一阶段。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         from engines.state.models import TaskIntakeResult
 
         # 如果 task_intake 已由外部设置（如 CLI 直接指定），直接使用
@@ -315,12 +382,11 @@ class IntakeHandler(StageHandler):
 
         intake = state.task_intake
 
-        # 根据风险等级调整 Guard 严格度 + 启用 worktree 隔离
+        # 根据风险等级调整 Guard 严格度
         if intake.risk_level in ("L4", "L5"):
+            # 高风险任务需要严格审查
             logger.warning("Risk level %s — requires strict guard mode", intake.risk_level)
             state.task_state.notes.append(f"高风险任务 (L4-L5)，需要 strict guard 模式")
-            state.use_worktree = True
-            state.task_state.notes.append("[INTAKE] 已启用 Worktree 隔离 (L4/L5 强制)")
 
         # 记录入口分析结果
         logger.info(
@@ -331,75 +397,194 @@ class IntakeHandler(StageHandler):
 
         # 根据 flow_mode 决定下一阶段
         if intake.flow_mode == "direct":
+            # Direct 模式：跳过 SPEC/PLAN，直接进入 DIRECT_EXECUTE
             return self._advance_to(state, StageType.DIRECT_EXECUTE,
                                     f"Direct Mode (risk={intake.risk_level}): {intake.reason}")
         else:
+            # 标准流程：进入 SPEC 阶段
             return self._advance_to(state, StageType.SPEC,
                                     f"Standard flow (risk={intake.risk_level}): {intake.reason}")
 
 
 class SpecHandler(StageHandler):
-    """Spec 生成处理器 —— 透传桩。
-
-    Spec 生成已移至 AI skill（/aicode-spec），Python 侧不再编排 Spec 流程。
-    该 handler 仅标记阶段并直接流转到 PLAN。
-    """
+    """Spec 生成处理器 —— Gate 检查 → AI skill → 产物校验 → 流转。"""
 
     stage = StageType.SPEC
+    MAX_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
         state.task_state.stage = StageType.SPEC
-        state.task_state.notes.append("[SPEC] 由 AI skill 处理 (/aicode-spec)，Python 侧透传")
-        logger.info("SpecHandler: pass-through to PLAN")
-        return self._complete(state, "Spec 由 AI skill 处理")
+
+        from engines.runtime.completion_gate import _check_spec
+        gate = _check_spec(state)
+
+        if not gate.passed:
+            retries = state.metadata.get("spec_gate_retries", 0)
+            if retries >= self.MAX_RETRIES:
+                logger.error("SpecHandler: gate failed %d times, aborting", retries)
+                state.task_state.notes.append(f"[SPEC] Gate 失败 {retries} 次，中止")
+                return self._stop_failure(state, f"Spec gate 失败 {retries} 次: {gate.message}")
+            state.metadata["spec_gate_retries"] = retries + 1
+            logger.info("SpecHandler: gate failed (retry %d/%d), asking AI — %s", retries + 1, self.MAX_RETRIES, gate.message)
+            state.needs_ai_input = True
+            state.pending_action = "generate_spec"
+            state.pending_prompt = {
+                "instruction": f"请运行 /aicode-spec 生成 Spec。\n上次校验失败 (第{retries+1}次): {gate.message}",
+            }
+            state.task_state.notes.append(f"[SPEC] Gate 未通过 (第{retries+1}次): {gate.message}")
+            return state
+
+        logger.info("SpecHandler: gate passed, advancing to PLAN")
+        state.task_state.notes.append("[SPEC] Spec 校验通过 → PLAN")
+        return self._complete(state, "Spec 校验通过")
 
 
 class TestDesignStageHandler(StageHandler):
-    """测试设计处理器 —— 透传桩。
+    """测试设计处理器 —— Gate 检查 → AI skill → 场景校验 → 流转。
 
-    测试用例生成由 AI skill（/aicode-test-design）完成。
-    Python 侧仅在 AI 提交结果后进行校验和门禁检查。
-
-    AI 职责:
-      1. 读取 spec 产物（state.spec_entry）
-      2. 按 Schema 生成 TestDesignBundle YAML
-      3. 调用 test-design process --input <yaml> 一键校验+门禁+映射
-      4. 提交结果到 state
+    Gate 通过后自动扫描 .ai/scenarios/ 子目录，记录到 state.metadata["scenario_dir"]，
+    供后续 VERIFY 阶段精确加载对应场景。
     """
 
     stage = StageType.TEST_DESIGN
+    MAX_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
         state.task_state.stage = StageType.TEST_DESIGN
-        state.task_state.notes.append(
-            "[TEST_DESIGN] 由 AI skill 处理 (/aicode-test-design)，Python 侧透传"
-        )
-        logger.info("TestDesignStageHandler: pass-through to EXECUTE")
 
-        # 如果已经有 test_design_bundle（从 AI 提交的 continue 恢复），直接流转
-        if state.test_design_bundle:
+        # resume 时：AI 返回了 scenario_dir → 写入 metadata
+        sr = state.metadata.get("scenarios_result") or {}
+        if isinstance(sr, dict) and sr.get("scenario_dir"):
+            state.metadata["scenario_dir"] = sr["scenario_dir"]
             state.task_state.notes.append(
-                f"[TEST_DESIGN] 已生成 {len(state.test_case_refs)} 条用例，"
-                f"{len(state.scenario_candidate_refs)} 条 Scenario 候选"
+                f"[TEST_DESIGN] AI 指定场景目录: .ai/scenarios/{sr['scenario_dir']}/"
             )
 
-        return self._complete(state, "Test Design 由 AI skill 处理")
+        from engines.runtime.completion_gate import _check_test_design
+        gate = _check_test_design(state)
+
+        if not gate.passed:
+            retries = state.metadata.get("td_gate_retries", 0)
+            if retries >= self.MAX_RETRIES:
+                logger.error("TestDesignStageHandler: gate failed %d times, aborting", retries)
+                state.task_state.notes.append(f"[TEST_DESIGN] Gate 失败 {retries} 次，中止")
+                return self._stop_failure(state, f"Test Design gate 失败 {retries} 次: {gate.message}")
+            state.metadata["td_gate_retries"] = retries + 1
+            state.metadata["scenarios_generated"] = True  # 标记已触发，resume 后检查实际文件
+            logger.info("TestDesignStageHandler: gate failed (retry %d/%d), asking AI — %s", retries + 1, self.MAX_RETRIES, gate.message)
+
+            # 从 user_input 或 SPEC 产物中提取 feature 名，给 AI 更明确的目录提示
+            feature_hint = self._extract_feature_name(state)
+            dir_hint = f".ai/scenarios/{feature_hint}/" if feature_hint else ".ai/scenarios/<feature>/"
+
+            state.needs_ai_input = True
+            state.pending_action = "generate_scenarios"
+            state.pending_prompt = {
+                "instruction": (
+                    f"请运行 /aicode-test-design --mode full，生成 Scenario YAML 到 {dir_hint}。\n"
+                    f"上次校验失败 (第{retries+1}次): {gate.message}\n"
+                    f"完成后返回: {{\"scenario_dir\": \"<子目录名>\"}}"
+                ),
+            }
+            state.task_state.notes.append(f"[TEST_DESIGN] Gate 未通过 (第{retries+1}次): {gate.message}")
+            return state
+
+        logger.info("TestDesignStageHandler: gate passed, advancing to EXECUTE")
+        state.metadata["td_gate_passed"] = True
+
+        # ── 自动记录场景子目录，传给后续 VERIFY 阶段 ──
+        self._record_scenario_dir(state)
+
+        state.task_state.notes.append("[TEST_DESIGN] 场景校验通过 → EXECUTE")
+        return self._complete(state, "Test Design 校验通过")
+
+    @staticmethod
+    def _extract_feature_name(state: RunState) -> str:
+        """从 user_input 或 SPEC 文档中提取 feature 名，用作场景子目录名。"""
+        user_input = (state.metadata or {}).get("user_input", "")
+        if user_input:
+            # 简单提取：取中文关键词或英文模块名
+            import re
+            # 匹配常见模式：实现XX功能、XX模块
+            m = re.search(r'(?:实现|开发|修复)([一-龥a-zA-Z0-9_]+?)(?:功能|模块|接口|流程|逻辑|页面|API|api)?', user_input)
+            if m:
+                return m.group(1).strip().lower().replace(" ", "-")
+            # 取前几个词
+            words = user_input.strip().split()
+            if words:
+                return words[0].strip('"\'""''').lower()
+        return ""
+
+    @staticmethod
+    def _record_scenario_dir(state: RunState) -> None:
+        """记录场景子目录到 state.metadata 供 VERIFY 使用。
+
+        优先用 handler 已提取的 feature_hint，不扫描全目录避免拿到旧场景。
+        """
+        from pathlib import Path
+        try:
+            # 优先：直接拿刚才 AI 生成的子目录名
+            feature_hint = state.metadata.get("_feature_hint", "").strip()
+            if feature_hint:
+                target = Path(state.project_root) / ".ai" / "scenarios" / feature_hint
+                if target.is_dir() and any(target.rglob("*.yaml")):
+                    state.metadata["scenario_dir"] = feature_hint
+                    state.task_state.notes.append(
+                        f"[TEST_DESIGN] 场景目录: .ai/scenarios/{feature_hint}/ → VERIFY 使用"
+                    )
+                    return
+
+            # 回退：扫描目录
+            scenarios_dir = Path(state.project_root) / ".ai" / "scenarios"
+            subdirs = sorted([
+                d.name for d in scenarios_dir.iterdir()
+                if d.is_dir() and any(d.rglob("*.yaml"))
+            ])
+            if len(subdirs) == 1:
+                state.metadata["scenario_dir"] = subdirs[0]
+                state.task_state.notes.append(
+                    f"[TEST_DESIGN] 场景目录: .ai/scenarios/{subdirs[0]}/"
+                )
+            elif len(subdirs) > 1:
+                state.metadata["scenario_dirs"] = subdirs
+                state.task_state.notes.append(
+                    f"[TEST_DESIGN] 多场景目录: {subdirs}"
+                )
+        except Exception as exc:
+            logger.debug("Record scenario dir skipped: %s", exc)
 
 
 class PlanHandler(StageHandler):
-    """计划生成处理器 —— 透传桩。
-
-    Plan 生成已移至 AI skill（/aicode-plan），Python 侧不再编排 Plan 流程。
-    该 handler 仅标记阶段并直接流转到 EXECUTE。
-    """
+    """计划生成处理器 —— Gate 检查 → AI skill → 产物校验 → 流转。"""
 
     stage = StageType.PLAN
+    MAX_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
         state.task_state.stage = StageType.PLAN
-        state.task_state.notes.append("[PLAN] 由 AI skill 处理 (/aicode-plan)，Python 侧透传")
-        logger.info("PlanHandler: pass-through to EXECUTE")
-        return self._complete(state, "Plan 由 AI skill 处理")
+
+        from engines.runtime.completion_gate import _check_plan
+        gate = _check_plan(state)
+
+        if not gate.passed:
+            retries = state.metadata.get("plan_gate_retries", 0)
+            if retries >= self.MAX_RETRIES:
+                logger.error("PlanHandler: gate failed %d times, aborting", retries)
+                state.task_state.notes.append(f"[PLAN] Gate 失败 {retries} 次，中止")
+                return self._stop_failure(state, f"Plan gate 失败 {retries} 次: {gate.message}")
+            state.metadata["plan_gate_retries"] = retries + 1
+            logger.info("PlanHandler: gate failed (retry %d/%d), asking AI — %s", retries + 1, self.MAX_RETRIES, gate.message)
+            state.needs_ai_input = True
+            state.pending_action = "generate_plan"
+            state.pending_prompt = {
+                "instruction": f"请运行 /aicode-plan 生成 Plan。\n上次校验失败 (第{retries+1}次): {gate.message}",
+            }
+            state.task_state.notes.append(f"[PLAN] Gate 未通过 (第{retries+1}次): {gate.message}")
+            return state
+
+        logger.info("PlanHandler: gate passed, advancing to TEST_DESIGN")
+        state.task_state.notes.append("[PLAN] Plan 校验通过 → TEST_DESIGN")
+        return self._complete(state, "Plan 校验通过")
 
 
 class ExecuteHandler(StageHandler):
@@ -427,36 +612,28 @@ class ExecuteHandler(StageHandler):
     MAX_PLAN_CHANGE_REQUESTS = 3  # 每个任务最多发起 3 次变更请求
 
     def handle(self, state: RunState) -> RunState:
+        """处理 EXECUTE 阶段：逐 Task 执行的主循环。
+
+        支持三个阶段：PREPARE（确认约束）、CONFIRM（确认 Checklist）、VALIDATE（校验结果）。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         state.task_state.stage = StageType.EXECUTE
 
         # 初始化 per-task 循环
         contracts = state.plan_contracts
         if not contracts:
+            # 无 Plan Contracts，无法执行
             state.task_state.notes.append(
                 "[EXECUTE] ⚠️ 无 Plan Contracts — 无法执行。"
                 "请先运行 'loop plan' 或 'loop plan-only' 生成 Plan，"
                 "或通过 --state-file 传入含 Plan 的状态文件"
             )
             return self._complete(state, "无 Plan Contracts — 需要先生成 Plan")
-
-        # 0. Upstream Sync — 开始执行前检查上游变化（架构 §17.2）
-        #    仅在第一个 Task 开始前执行一次
-        if state.task_state.current_task_index == 0:
-            sync_result = self._upstream_sync(state)
-            if sync_result:
-                state.task_state.notes.append(sync_result)
-                if "冲突" in sync_result:
-                    state.needs_ai_input = True
-                    state.pending_action = "resolve_upstream_conflicts"
-                    state.pending_prompt = {
-                        "instruction": (
-                            "检测到上游代码冲突，需要人工处理:\n"
-                            f"{sync_result}\n"
-                            "解决冲突后重新运行 loop continue 继续执行。"
-                        ),
-                        "sync_result": sync_result,
-                    }
-                    return state
 
         current_idx = state.task_state.current_task_index
         if current_idx >= len(contracts):
@@ -468,6 +645,18 @@ class ExecuteHandler(StageHandler):
         # ── Phase VALIDATE: AI 已提交当前 Task 结果 ──
         submitted = state.metadata.get("execute_result")
         if submitted and isinstance(submitted, dict):
+            # 确认回复处理: AI 提交了 checklist 确认 → 切换为编码阶段
+            if submitted.get("confirmed"):
+                state.metadata.pop("execute_result", None)
+                state.metadata["execute_checklist_confirmed"] = True
+                confirmed_notes = submitted.get("notes", "")
+                state.task_state.notes.append(
+                    f"[EXECUTE] ✅ Checklist 已确认: {confirmed_notes[:100]}"
+                )
+                state.needs_ai_input = False
+                logger.info("Checklist confirmed, advancing to full task prompt")
+                return state  # 下一轮 _prepare_full_task 构造编码 prompt
+
             # PlanLock 恢复路径: AI 提交 lock_plan 指令
             if submitted.get("lock_plan"):
                 state.plan_lock_state = "locked"
@@ -475,36 +664,122 @@ class ExecuteHandler(StageHandler):
                 state.metadata.pop("execute_result", None)
                 state.task_state.notes.append("[EXECUTE] PlanLock → locked (AI 确认)")
                 logger.info("Plan locked by AI confirmation")
-                # 重新进入 PREPARE 构造真正的编码 prompt
-                return self._prepare_task(state, contracts[current_idx], current_idx, len(contracts))
+                return self._prepare_full_task(state, contracts[current_idx], current_idx, len(contracts))
             return self._validate_task_result(state, submitted, contracts[current_idx])
 
-        # ── Phase PREPARE: Task Start Gate + 构造 prompt ──
-        return self._prepare_task(state, contracts[current_idx], current_idx, len(contracts))
+        # ── Phase CONFIRM: AI 已确认 Checklist ──
+        checklist_confirmed = state.metadata.get("execute_checklist_confirmed")
+        if checklist_confirmed:
+            # 清除确认标记，进入完整编码阶段
+            state.metadata.pop("execute_checklist_confirmed", None)
+            return self._prepare_full_task(state, contracts[current_idx], current_idx, len(contracts))
+
+        # ── Phase PREPARE: 先让 AI 确认约束，再给编码指令 ──
+        return self._prepare_checklist(state, contracts[current_idx], current_idx, len(contracts))
 
     # ══════════════════════════════════════════════════════════════
     # PREPARE — Task Start Gate (架构 §8.7.2)
     # ══════════════════════════════════════════════════════════════
 
-    def _prepare_task(
+    def _prepare_checklist(
         self, state: RunState, contract: dict, idx: int, total: int,
     ) -> RunState:
-        """构造当前 Task 的执行 prompt。"""
+        """Phase 1: 先让 AI 确认任务约束，防止范围膨胀。AI 必须先回复确认才能编码。
+
+        Args:
+            state: 当前运行状态
+            contract: Plan 合约字典
+            idx: 当前 Task 索引
+            total: Task 总数
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
+        task_id = contract.get("task_id", f"T{idx + 1}")
+        allowed = contract.get("allowed_files", [])
+        forbidden = contract.get("forbidden_files", [])
+        budget = contract.get("budget", {})
+        task_summary = contract.get("goal", contract.get("title", ""))
+        # 构建实现检查清单
+        checklist = self._build_checklist(contract)
+
+        # 加载编码前反模式警告
+        preflight = self._load_preflight_warnings(state)
+
+        instruction = (
+            f"## Task {task_id} ({idx + 1}/{total}): {task_summary}\n\n"
+            "**在编码之前，你必须逐项验证以下约束，发现问题必须指出。验证通过方可开始写代码。**\n\n"
+            f"### 1. 修改范围 — Plan 声明\n"
+            f"- ✅ 允许: {allowed}\n"
+            f"- ❌ 禁止: {forbidden}\n"
+            f"- 📏 预算: ≤{budget.get('max_files', 3)} files / "
+            f"≤{budget.get('max_lines_changed', budget.get('max_lines', 200))} lines\n"
+            f"- 🚫 新抽象: {'禁止' if not budget.get('allow_new_abstractions', False) else '允许'}\n"
+            f"- 📦 新依赖: {'禁止' if not budget.get('allow_new_dependencies', False) else '允许'}\n"
+            f"\n### 2. 逐项验证（你必须对每一项给出确切回答，不能只说'OK'）\n"
+            f"- 允许改的文件真的存在吗？需要改吗？\n"
+            f"- 禁止区域里有没有本次必须碰的文件？（如果有 → 要求 Plan Change）\n"
+            f"- 预算够不够？如果不够 → 说明原因并要求 Plan Change\n"
+            f"- 项目中是否已有可复用的实现？（搜索后给出具体函数名/文件名）\n"
+            f"- 有没有可能影响被依赖 Task（{requires_str}）的接口？\n"
+            f"\n### 3. 回复格式（必须逐项回答）\n"
+            f"\"验证 Task {task_id}:\n"
+            f" 1. 文件范围: [已验证，只改 {allowed} / 有疑问，xxx需要额外修改]\n"
+            f" 2. 禁止区域: [无冲突 / 冲突: xxx文件在禁止列表但必须改，原因: ...]\n"
+            f" 3. 预算: [够用，预计 N files ~M lines / 不够，原因: ...]\n"
+            f" 4. 复用: [找到可复用: XxxUtil.method() / 搜索后未找到]\n"
+            f" 5. 下游影响: [不影响 / 会影响 requires_str 的 xxx 接口]\n"
+            f" → 全部验证通过，请求编码\""
+        )
+
+        if preflight:
+            instruction += "\n\n### ⚠️ 项目记忆警告\n" + "\n".join(f"- {w}" for w in preflight)
+
+        # REVIEW→EXECUTE 反馈闭环: 注入同模块的历史审查发现
+        review_findings = state.metadata.get("review_findings_by_module", {})
+        module_warnings: list[str] = []
+        for f in allowed:
+            module = self._infer_module_from_file(f)
+            if module and module in review_findings:
+                module_warnings.extend(review_findings[module])
+        if module_warnings:
+            unique = list(dict.fromkeys(module_warnings))[:5]  # 去重 + 限5条
+            instruction += (
+                "\n\n### 🔁 REVIEW 反馈（同模块历史审查发现，注意不要重犯）\n"
+                + "\n".join(f"- {w}" for w in unique)
+            )
+
+        state.pending_action = "confirm_checklist"
+        state.pending_prompt = {
+            "instruction": instruction,
+            "submission_format": {"confirmed": True, "notes": ""},
+            "checklist_items": checklist,
+        }
+        state.needs_ai_input = True
+        state.task_state.notes.append(
+            f"[EXECUTE] CONFIRM: Task {task_id} ({idx + 1}/{total}) — 等待 AI 确认约束"
+        )
+        logger.info("Checklist confirmation requested for Task %s", task_id)
+        return state
+
+    def _prepare_full_task(
+        self, state: RunState, contract: dict, idx: int, total: int,
+    ) -> RunState:
+        """Phase 2: AI 确认通过后，构造完整编码 prompt。
+
+        Args:
+            state: 当前运行状态
+            contract: Plan 合约字典
+            idx: 当前 Task 索引
+            total: Task 总数
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         task_id = contract.get("task_id", f"T{idx + 1}")
 
         # 1. Task Start Gate — 边界重新确认
         self._task_start_gate(state, contract, idx, total)
-
-        # 1.5. Worktree 隔离检查 — L4/L5 或显式设置时创建隔离环境
-        if state.use_worktree or (
-            state.task_intake and state.task_intake.risk_level in ("L4", "L5")
-        ):
-            state.use_worktree = True
-            if not self._ensure_worktree(state):
-                return self._stop_failure(
-                    state,
-                    "Worktree 隔离环境创建失败，L4/L5 任务拒绝在主工作区执行",
-                )
 
         # 2. Guard 前置检查
         if not self._pre_guard_check(state):
@@ -562,7 +837,8 @@ class ExecuteHandler(StageHandler):
             "",
             f"修改文件: {allowed}",
             f"禁止修改: {forbidden}",
-            f"上限: {budget.get('max_files', 3)} files / {budget.get('max_lines', 100)} lines",
+            f"上限: {budget.get('max_files', 3)} files / "
+            f"{budget.get('max_lines_changed', budget.get('max_lines', 200))} lines",
             f"新抽象: {budget.get('allow_new_abstractions', False)} | 新依赖: {budget.get('allow_new_dependencies', False)}",
             f"依赖: {depends_str} | 被依赖: {requires_str}",
             "",
@@ -595,7 +871,7 @@ class ExecuteHandler(StageHandler):
             "style_contract": contract.get("style_contract", {}),
             "budget": {
                 "max_files": budget.get("max_files", 3),
-                "max_lines": budget.get("max_lines", 100),
+                "max_lines": budget.get("max_lines_changed", budget.get("max_lines", 200)),
                 "allow_new_abstractions": budget.get("allow_new_abstractions", False),
                 "allow_new_dependencies": budget.get("allow_new_dependencies", False),
             },
@@ -609,10 +885,6 @@ class ExecuteHandler(StageHandler):
                 "new_abstractions": [],
                 "new_dependencies": [],
             },
-            "worktree": {
-                "enabled": state.use_worktree,
-                "path": state.metadata.get("worktree_path", ""),
-            } if state.use_worktree else {"enabled": False},
         }
         state.needs_ai_input = True
         state.task_state.status = state.task_state.status.__class__.IN_PROGRESS
@@ -736,10 +1008,10 @@ class ExecuteHandler(StageHandler):
             logger.info("All tasks executed, advancing to VERIFY")
             return self._complete(state, f"全部 {len(state.plan_contracts)} Tasks 执行完成")
         else:
-            # 继续下一个 Task → 循环回到 PREPARE
+            # 继续下一个 Task → 先过 Checklist 确认
             next_contract = state.plan_contracts[state.task_state.current_task_index]
             logger.info("Advancing to next task: %s", next_contract.get("task_id", "?"))
-            return self._prepare_task(
+            return self._prepare_checklist(
                 state, next_contract,
                 state.task_state.current_task_index, len(state.plan_contracts),
             )
@@ -821,6 +1093,17 @@ class ExecuteHandler(StageHandler):
     # ══════════════════════════════════════════════════════════════
 
     @staticmethod
+    def _infer_module_from_file(file_path: str) -> str:
+        parts = file_path.replace("\\", "/").split("/")
+        if "src" in parts:
+            idx = parts.index("src")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        if len(parts) > 1:
+            return parts[0]
+        return ""
+
+    @staticmethod
     def _build_checklist(contract: dict) -> list[str]:
         """从 Plan Contract 构建可执行的 Implementation Checklist。
 
@@ -893,86 +1176,6 @@ class ExecuteHandler(StageHandler):
         )
         logger.info("Task Start Gate: %s", task_id)
 
-    def _ensure_worktree(self, state: RunState) -> bool:
-        """确保 Worktree 隔离环境已创建（架构 §17.3）。
-
-        对于 L4/L5 任务，在独立 git worktree 中执行以隔离风险。
-
-        Returns:
-            True 如果隔离环境就绪或不需要隔离，False 如果需要但创建失败。
-        """
-        if not state.use_worktree:
-            return True  # 不需要隔离
-        if state.metadata.get("worktree_path"):
-            return True  # 已创建
-
-        try:
-            from pathlib import Path
-
-            from engines.runtime.worktree_isolator import WorktreeIsolator
-
-            project_root = Path(state.project_root) if state.project_root else Path.cwd()
-            isolator = WorktreeIsolator(project_root=project_root)
-
-            if not isolator.available:
-                # L4/L5: git worktree 不可用 → 不是 git 仓库，降级为 warning 但继续
-                state.task_state.notes.append(
-                    "[EXECUTE worktree] 非 git 仓库，无法创建 worktree 隔离"
-                )
-                # 非 git 仓库允许继续，因为无法使用 git 进行隔离
-                return True
-
-            result = isolator.create(task_id=state.task_id)
-            if result.success:
-                state.metadata["worktree_path"] = result.worktree_path
-                state.metadata["worktree_branch"] = result.branch_name
-                state.task_state.notes.append(
-                    f"[EXECUTE worktree] 已创建隔离环境: {result.worktree_path} "
-                    f"(branch={result.branch_name})"
-                )
-                logger.info("Worktree created: %s", result.worktree_path)
-                return True
-            else:
-                state.task_state.notes.append(
-                    f"[EXECUTE worktree] 创建失败: {result.message}"
-                )
-                return False
-        except Exception as exc:
-            logger.warning("Worktree setup skipped: %s", exc)
-            state.task_state.notes.append(f"[EXECUTE worktree] 异常: {exc}")
-            return False
-
-    def _upstream_sync(self, state: RunState) -> str | None:
-        """Upstream Sync — 检查上游是否有新提交（架构 §17.2）。
-
-        Returns:
-            同步结果摘要，无变化时返回 None。
-        """
-        try:
-            from pathlib import Path
-
-            from engines.runtime.git_sync import GitSyncer
-
-            project_root = Path(state.project_root) if state.project_root else Path.cwd()
-            syncer = GitSyncer(project_root=project_root)
-            result = syncer.sync(auto_merge=False)  # 只检测，不自动合并
-
-            if not result.success:
-                return f"[EXECUTE upstream] 同步失败: {result.message}"
-            if result.behind_count == 0:
-                return None  # 已是最新
-            if result.conflicts:
-                return (
-                    f"[EXECUTE upstream] ⚠️ 检测到冲突: {result.conflicts}, "
-                    f"落后 {result.behind_count} 个提交"
-                )
-            return (
-                f"[EXECUTE upstream] 落后 {result.behind_count} 个提交 "
-                f"(无冲突, 可自动合并)"
-            )
-        except Exception as exc:
-            logger.debug("Upstream sync skipped: %s", exc)
-            return None
 
     def _pre_guard_check(self, state: RunState) -> bool:
         """审查前置检查 —— 在 AI 编码前运行默认规则集。"""
@@ -1000,118 +1203,10 @@ class ExecuteHandler(StageHandler):
             return False
 
     def _load_execute_context(self, state: RunState, contract: dict) -> str:
-        """ContextRouter 注入当前 Task 需要的上下文。
+        """AI 自行使用 Read / CodeGraph MCP 获取上下文，Python 不注入。"""
+        return ""
 
-        上下文预算感知: 加载前检查预算，加载后跟踪使用量。
-        返回渲染后的上下文文本，可直接注入 AI prompt。
-
-        同时写入 .ai/memory/context/{task_id}-memory.md（Path A 文件注入），
-        供 superpowers 路径按需读取。不污染规则文件。
-        """
-        try:
-            from engines.context.router import ContextRouter
-            router = self._get_context_router(state)
-            bundle = router.route(stage=StageType.EXECUTE, run_state=state)
-            if bundle and bundle.pieces:
-                # 上下文预算检查
-                if not self._check_context_budget(state, bundle.total_tokens):
-                    state.task_state.notes.append(
-                        "[EXECUTE context] 上下文预算超限，已截断"
-                    )
-                self._track_context_usage(state, bundle.total_tokens)
-                state.task_state.notes.append(
-                    f"[EXECUTE context] tokens={bundle.total_tokens}, "
-                    f"files={len(bundle.pieces)}, "
-                    f"pointers={len(bundle.trimmed_pointers)}, "
-                    f"budget={state.context_budget_used}/{state.context_budget_max}"
-                )
-                if bundle.trimmed:
-                    state.task_state.notes.append(
-                        f"[EXECUTE context] Context 已截断 (trimmed={bundle.trimmed}, "
-                        f"pointers={len(bundle.trimmed_pointers)})"
-                    )
-
-                # ── 记录注入的记忆 ID（供 VERIFY 阶段效果评估）──
-                injected_ids = [
-                    p.path for p in bundle.pieces
-                    if p.source == "memory" and p.path
-                ]
-                if injected_ids:
-                    existing = state.metadata.get("injected_memory_ids", [])
-                    state.metadata["injected_memory_ids"] = list(dict.fromkeys(existing + injected_ids))
-
-                # ── Path A 文件注入 ──
-                task_id = contract.get("task_id", state.task_id)
-                context_file = self._inject_context_file(bundle, task_id, state.project_root)
-                if context_file:
-                    state.task_state.notes.append(
-                        f"[EXECUTE context] 记忆上下文文件已写入 {context_file}"
-                    )
-
-                return bundle.render()
-            return ""
-        except Exception as exc:
-            logger.warning("ContextRouter failed for EXECUTE: %s", exc)
-            return ""
-
-    def _inject_context_file(
-        self, bundle, task_id: str, project_root: str
-    ) -> str | None:
-        """Path A 文件注入: 将记忆和 pointer 写入独立文件。
-
-        不污染 CLAUDE.md / rules/*.md。
-        文件路径: .ai/memory/context/{task_id}-memory.md
-        """
-        from pathlib import Path
-        try:
-            context_dir = Path(project_root) / ".ai" / "memory" / "context"
-            context_dir.mkdir(parents=True, exist_ok=True)
-
-            filepath = context_dir / f"{task_id}-memory.md"
-
-            lines = [
-                f"# 任务上下文 — {task_id}",
-                "",
-                "> 此文件由 Loop Runtime 自动生成。可按需读取，不强制加载。",
-                "",
-            ]
-
-            # 记忆条目摘要
-            mem_pieces = [p for p in bundle.pieces if p.source == "memory"]
-            if mem_pieces:
-                lines.append("## 相关项目记忆")
-                lines.append("")
-                for mp in mem_pieces:
-                    lines.append(f"- {mp.content}")
-                lines.append("")
-
-            # 被裁剪的 pointers
-            if bundle.trimmed_pointers:
-                lines.append("## 可回捞内容（被裁剪）")
-                lines.append("")
-                for tp in bundle.trimmed_pointers:
-                    lines.append(f"- **[{tp.type}]** {tp.summary}")
-                    if tp.why_relevant:
-                        lines.append(f"  - 关联: {tp.why_relevant}")
-                    if tp.retrieval_hint:
-                        lines.append(f"  - 回捞: `{tp.retrieval_hint}`")
-                lines.append("")
-
-            filepath.write_text("\n".join(lines), encoding="utf-8")
-            return str(filepath)
-        except Exception as exc:
-            logger.warning("Failed to write context file: %s", exc)
-            return None
-
-    # ContextRouter 实例缓存（per-handler 复用，避免重复初始化）
-    _cached_router = None
-
-    def _get_context_router(self, state: RunState):
-        """获取复用的 ContextRouter 实例（P3 优化：避免 per-task 重复初始化）。"""
-        if self._cached_router is None:
-            from engines.context.router import ContextRouter
-            self._cached_router = ContextRouter(state.project_root)
-        return self._cached_router
+    # ContextRouter 已移除 — AI 自行使用 Read / CodeGraph MCP。
 
     def _count_actual_diff(
         self, state: RunState, changed_files: list[str],
@@ -1365,34 +1460,188 @@ class ExecuteHandler(StageHandler):
             return {"status": "skipped", "reason": str(exc)}
 
 
-class VerifyHandler(StageHandler):
-    """验证处理器 —— 运行 ScenarioRunner + SanityChecker，判断通过/失败。
+def _auto_detect_related_scenarios(state, scenarios_dir) -> set[str]:
+    """从 changed_files 推断模块，找到关联的 Scenario ID 集合。
 
-    Python 职责（架构定义）:
-        ScenarioRunner 跑场景、SanityChecker 检查环境
-    AI 职责:
-        读失败报告、判断根因
+    复用 RepairHandler 的推断逻辑：changed_files → module → 匹配 Scenario id/name/steps。
+    返回空集合表示无法推断（应加载全部）。
+    """
+    try:
+        from pathlib import Path
+
+        module = _infer_module_from_state(state)
+        if not module:
+            return set()
+
+        # 检查是否有同名子目录
+        module_dir = scenarios_dir / module
+        if module_dir.is_dir() and any(module_dir.rglob("*.yaml")):
+            logger.info("Auto-detected module=%s, found matching subdir .ai/scenarios/%s/", module, module)
+            return set()  # 不按 id 过滤，后面直接用子目录加载
+
+        # 查找关联 Scenario（复用 RepairHandler 的静态方法）
+        related = RepairHandler._find_related_scenarios(state, module)
+        logger.info(
+            "Auto-detected module=%s → %d related scenarios (by name match)",
+            module, len(related),
+        )
+        return set(related)
+    except Exception as exc:
+        logger.debug("Auto-detect scenarios skipped: %s", exc)
+        return set()
+
+
+def _infer_module_from_state(state) -> str:
+    """从 state.checkpoints 收集 changed_files，推断所属模块名。"""
+    changed_files: list[str] = []
+    for cp in (state.checkpoints or []):
+        changed_files.extend(cp.files_changed)
+    changed_files = list(dict.fromkeys(changed_files))  # 去重保序
+
+    if not changed_files:
+        return ""
+
+    return RepairHandler._infer_module(changed_files)
+
+
+def _get_service_base_url(project_root) -> str:
+    """从 loop-config.json 读取服务基础地址。
+
+    services[0].health = "http://localhost:8089/actuator/health" → "http://localhost:8089"
+    没配就报错，不 fallback。
+    """
+    import json as _json
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    root = Path(project_root)
+    config_path = root / ".ai" / "loop-config.json"
+    if not config_path.exists():
+        raise RuntimeError("未找到 .ai/loop-config.json，请先运行 aicode-init")
+
+    cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+    services = cfg.get("services", [])
+    if not services or not services[0].get("health"):
+        raise RuntimeError("loop-config.json 中未配置 services[0].health，请检查配置")
+
+    parsed = urlparse(services[0]["health"])
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _find_mcp_json(project_root) -> Path | None:
+    """自动探测当前项目的 mcp.json 路径。
+
+    搜索顺序:
+      1. .ai/loop-config.json 的 target_tool → 项目级 mcp.json
+      2. 项目根目录 .claude/.codex/.cursor/mcp.json
+      3. 全局 ~/.claude/mcp.json (Claude Code 全局配置)
+    """
+    from pathlib import Path
+    import json as _json
+
+    root = Path(project_root)
+
+    # 1. loop-config.json 指定的工具 → 项目级 mcp.json
+    loop_config = root / ".ai" / "loop-config.json"
+    if loop_config.exists():
+        try:
+            cfg = _json.loads(loop_config.read_text(encoding="utf-8"))
+            target = cfg.get("target_tool", "")
+            path_map = {
+                "claude_code": ".claude/mcp.json",
+                "codex": ".codex/mcp.json",
+                "cursor": ".cursor/mcp.json",
+            }
+            if target in path_map:
+                mcp_path = root / path_map[target]
+                if mcp_path.exists():
+                    return mcp_path
+        except Exception:
+            pass
+
+    # 2. 按目录探测项目级 mcp.json
+    for dir_name in (".claude", ".codex", ".cursor"):
+        mcp_path = root / dir_name / "mcp.json"
+        if mcp_path.exists():
+            return mcp_path
+
+    # 3. 全局 ~/.claude/mcp.json (Claude Code 全局 MCP 配置)
+    home = Path.home()
+    for global_path in (
+        home / ".claude" / "mcp.json",
+        home / ".codex" / "mcp.json",
+        home / ".cursor" / "mcp.json",
+    ):
+        if global_path.exists():
+            return global_path
+
+    return None
+
+
+class VerifyHandler(StageHandler):
+    """验证处理器 —— 完整自动化验证流水线。
+
+    流程: skip_verify 检查 → ServiceManager 启停 → SanityChecker →
+          AuthProvider → ScenarioRunner(HTTP/DB/Playwright) →
+          FailureClassifier → ReportGenerator
+
+    Python 全自动（0 token），AI 仅在 REAL_BUG 失败时介入 REPAIR。
     """
 
     stage = StageType.VERIFY
 
     def handle(self, state: RunState) -> RunState:
-        logger.info("Verify — running scenario verification and sanity checks")
+        """处理 VERIFY 阶段：执行完整自动化验证流水线。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
+        logger.info("Verify — full automated verification pipeline")
 
         state.task_state.status = state.task_state.status.__class__.VERIFYING
         state.task_state.stage = StageType.VERIFY
 
-        # 1. 运行 Sanity Check（从项目配置读取检查项，fallback 到合理默认）
+        # 0. skip_verify 检查（纯 docs/config 变更）
+        if state.metadata.get("skip_verify"):
+            state.task_state.notes.append("[VERIFY] skip_verify=True，跳过验证 → MEMORY")
+            state.verification.status = VerificationStatus.SKIPPED
+            state.verification.summary = "纯文档/配置变更，已跳过"
+            return self._complete(state, "skip_verify: 跳过验证")
+
+        # 0.5. ServiceManager — 启动测试服务
+        service_manager = None
+        try:
+            from engines.scenario.service_manager import ServiceManager
+
+            sm = ServiceManager(state.project_root)
+            if sm.load_config():
+                ok, svc_errors = sm.start_all()
+                if not ok:
+                    state.task_state.notes.append(
+                        f"[VERIFY] 服务启动失败: {'; '.join(svc_errors)}"
+                    )
+                    state.verification.status = VerificationStatus.FAILED
+                    state.verification.summary = "服务启动失败"
+                    return self._stop_failure(state, f"服务启动失败: {'; '.join(svc_errors)}")
+                service_manager = sm
+                state.task_state.notes.append(
+                    f"[VERIFY] 已启动 {len(sm._configs)} 个服务"
+                )
+        except Exception as exc:
+            logger.debug("ServiceManager skipped: %s", exc)
+
+        # 1. Sanity Check — 环境健康检查
         sanity_failures: list[str] = []
         try:
             from engines.scenario.sanity import SanityChecker
-            from engines.scenario.models import SanityCheckItem
             from engines.scenario.resources import default_adapters
 
             adapters = default_adapters()
             checker = SanityChecker(adapters=adapters)
 
-            # 读取项目级配置或使用默认值（不再硬编码 localhost）
             check_items = self._load_sanity_check_items(state)
             if check_items:
                 report = checker.check(check_items)
@@ -1403,31 +1652,83 @@ class VerifyHandler(StageHandler):
                             sanity_failures.append(msg)
                             logger.warning(msg)
                     state.task_state.notes.extend(sanity_failures)
-            else:
-                state.task_state.notes.append("[VERIFY] 无 Sanity 检查项配置，跳过")
         except Exception as exc:
             logger.warning("Sanity check failed: %s", exc)
             state.task_state.notes.append(f"[VERIFY] Sanity checker error: {exc}")
 
-        # 2. 运行 Scenario 验证
+        # 1.5. AuthProvider — 读取用户配置的 token
+        try:
+            from engines.scenario.auth_provider import AuthProvider
+
+            auth = AuthProvider(state.project_root)
+            if auth.load_config() and auth.token:
+                state.metadata["auth_token"] = auth.token
+                state.task_state.notes.append("[VERIFY] Auth token 已加载")
+            else:
+                state.task_state.notes.append("[VERIFY] 未配置 token，请求不带鉴权")
+        except Exception as exc:
+            logger.debug("AuthProvider skipped: %s", exc)
+
+        # 2. ScenarioRunner — 执行场景
         scenario_results: list = []
         try:
             from engines.scenario.runner import ScenarioRunner
             from engines.scenario.models import Scenario
 
-            runner = ScenarioRunner()
+            # 从 loop-config.json 读取服务地址
+            base_url = _get_service_base_url(state.project_root)
+            from engines.scenario.resources import HttpAdapter
+            custom_adapters = {"http": HttpAdapter(base_url=base_url)}
 
-            # 加载 .ai/scenarios/ 下的场景文件
-            scenarios = self._load_scenarios(state.project_root)
+            # 加载 DataSourceRegistry（DB/Redis/MQ 适配器）
+            from engines.scenario.adapters import DataSourceRegistry
+            ds_registry = DataSourceRegistry.load(state.project_root)
+            if ds_registry._adapters:
+                if not ds_registry.health_check_all():
+                    state.task_state.notes.append(
+                        "[VERIFY] ⚠️ 部分数据源健康检查失败，相关断言将报错"
+                    )
+
+            # 合并 DataSourceRegistry 适配器(含 mysql/redis)到 adapters，
+            # 使 fixture/teardown 能通过 fixture.type 找到对应适配器
+            adapters = ds_registry.to_adapter_dict()
+            adapters["http"] = custom_adapters["http"]  # 保留带 base_url 的 http
+            runner = ScenarioRunner(adapters=adapters, registry=ds_registry)
+            # 注入 auth token 到 runner
+            auth_token = state.metadata.get("auth_token")
+            if auth_token:
+                http_adapter = adapters.get("http")
+                if http_adapter:
+                    http_adapter._auth_token = auth_token
+
+            scenarios = self._load_scenarios(state)
+
+            # REPAIR 回归检查：优先跑关联 Scenario，验证修复是否引入新问题
+            related_ids = state.metadata.get("repair_related_scenarios", [])
+            if related_ids and scenarios:
+                # 关联场景排前面
+                ordered = sorted(
+                    scenarios,
+                    key=lambda s: 0 if (s.id in related_ids or s.name in related_ids) else 1,
+                )
+                related_count = len([s for s in ordered
+                                     if s.id in related_ids or s.name in related_ids])
+                state.task_state.notes.append(
+                    f"[VERIFY] 回归检查: 优先执行 {related_count} 个关联 Scenario"
+                )
+                scenarios = ordered
+
             if scenarios:
-                for scenario in scenarios:
-                    result = runner.run(scenario)
-                    scenario_results.append(result)
+                report = runner.run_all(scenarios)
+                scenario_results = report.results
+                state.task_state.notes.append(
+                    f"[VERIFY] {report.summary()}"
+                )
         except Exception as exc:
-            logger.warning("Scenario runner failed: %s", exc)
+            logger.warning("ScenarioRunner failed: %s", exc)
             state.task_state.notes.append(f"[VERIFY] ScenarioRunner error: {exc}")
 
-        # 3. 分析验证结果
+        # 3. 分析验证结果 + 失败分类
         # 环境故障（sanity 失败）→ 不可自动修复
         if sanity_failures:
             from engines.state.enums import FailureCategory
@@ -1443,144 +1744,408 @@ class VerifyHandler(StageHandler):
             state.verification.status = VerificationStatus.FAILED
             state.verification.summary = "; ".join(sanity_failures)
             state.task_state.notes.append(
-                "[VERIFY] 环境故障 — 不可自动修复, 请检查服务是否启动"
+                "[VERIFY] 环境故障 — 不可自动修复"
             )
-            logger.warning("Verification failed: environment issues detected")
+            self._cleanup(state, service_manager)
             return self._stop_failure(state, "环境故障: " + state.verification.summary)
 
-        # 代码逻辑故障（scenario assertions 失败）
+        # 写入 state.scenario_results
+        state.scenario_results = [
+            r.to_state_model() if hasattr(r, 'to_state_model') else r
+            for r in scenario_results
+        ]
+
+        # 失败分类 + 处理
         if scenario_results:
             failed = [r for r in scenario_results if not getattr(r, 'passed', True)]
+
             if failed:
                 from engines.state.enums import FailureCategory
                 from engines.state.models import FailureRecord
 
+                env_failures = 0
+                code_failures = 0
+                repair_contexts: list[dict] = []
+
                 for fr in failed:
-                    detail = getattr(fr, 'summary', str(fr))
+                    # 使用 runner 已计算好的 failure_category（不丢弃重算）
+                    fc_raw = getattr(fr, 'failure_category', None)
+                    if fc_raw == "ENVIRONMENT":
+                        fc = FailureCategory.ENVIRONMENT
+                        env_failures += 1
+                    elif fc_raw in ("TIMING", "ASSERTION"):
+                        fc = FailureCategory.TEST_DATA
+                    else:
+                        fc = FailureCategory.CODE_LOGIC
+                        code_failures += 1
+
+                    # 调用 repair_context() 获取结构化修复上下文
+                    rc_method = getattr(fr, 'repair_context', None)
+                    if callable(rc_method):
+                        try:
+                            repair_contexts.append(rc_method())
+                        except Exception:
+                            pass
+
+                    errors = getattr(fr, 'errors', [])
                     state.failures.append(FailureRecord(
-                        category=FailureCategory.CODE,
-                        message=detail,
+                        category=fc,
+                        message=str(errors) if errors else str(fr),
                         stage=StageType.VERIFY,
                         attempt_count=state.task_state.retry_count + 1,
                     ))
+
+                # 捕获服务日志片段（失败时供 AI 分析）
+                if service_manager:
+                    log_snippet = service_manager.get_log_snippet(
+                        service_manager._configs[0].name if service_manager._configs else "",
+                        max_chars=3000,
+                        errors_only=True,
+                    )
+                    if log_snippet:
+                        state.metadata["service_log_snippet"] = log_snippet
+                        state.task_state.notes.append(
+                            f"[VERIFY] 服务日志已捕获 ({len(log_snippet.splitlines())} 行错误)"
+                        )
+
+                # 存储结构化修复上下文
+                if repair_contexts:
+                    state.metadata["repair_contexts"] = repair_contexts
+
                 state.verification.status = VerificationStatus.FAILED
-                state.verification.summary = f"{len(failed)}/{len(scenario_results)} scenarios failed"
+                state.verification.summary = (
+                    f"{len(failed)}/{len(scenario_results)} scenarios failed "
+                    f"(env={env_failures}, code={code_failures})"
+                )
                 state.task_state.notes.append(
-                    f"[VERIFY] {len(failed)} scenarios failed — 进入 REPAIR"
+                    f"[VERIFY] {len(failed)} scenarios failed — "
+                    f"ENVIRONMENT={env_failures}, CODE={code_failures}"
                 )
 
-                # ── 记忆效果评估（失败 = 记忆被忽略）──
                 self._evaluate_memory_effectiveness(state, success=False)
 
-                logger.info("Verification failed: %d scenarios, entering REPAIR", len(failed))
-                return self._advance_to(state, StageType.REPAIR,
-                                        f"验证失败 ({len(failed)} scenarios), 进入修复")
+                # 失败时也要生成报告，让用户看到哪些场景挂了
+                self._generate_report(state, report=None, scenario_results=scenario_results)
 
-        # 无场景文件时标记 SKIPPED（不是 PASSED）
+                self._cleanup(state, service_manager)
+                logger.info("Verification failed, entering REPAIR")
+                # 仅代码逻辑错误进 REPAIR
+                if code_failures > 0:
+                    return self._advance_to(state, StageType.REPAIR,
+                                            f"验证失败 ({code_failures} code failures), 进入修复")
+                else:
+                    return self._stop_failure(state,
+                                              f"环境/时序/断言问题 ({env_failures}), 非代码错误不修复")
+
+        # 无场景文件
         if not scenario_results:
-            state.verification.status = VerificationStatus.SKIPPED \
-                if hasattr(VerificationStatus, 'SKIPPED') else VerificationStatus.PASSED
-            state.verification.summary = "无场景文件 (.ai/scenarios/*.yaml)，验证跳过"
-            state.task_state.notes.append("[VERIFY] 无场景文件 — 建议添加场景以确保质量")
-            logger.warning("No scenarios found, verification skipped")
+            self._cleanup(state, service_manager)
+            if state.metadata.get("td_gate_passed"):
+                # TEST_DESIGN gate 通过了但场景不见了 → 异常
+                msg = "TEST_DESIGN 通过了 Gate 但 VERIFY 找不到任何场景文件，可能被误删"
+                state.verification.status = VerificationStatus.FAILED
+                state.verification.summary = msg
+                state.task_state.notes.append(f"[VERIFY] ❌ {msg}")
+                return self._stop_failure(state, msg)
+            # 正常情况：项目还没有场景
+            state.verification.status = VerificationStatus.SKIPPED
+            state.verification.summary = "无场景文件 (.ai/scenarios/**/*.yaml)，验证跳过"
+            state.task_state.notes.append("[VERIFY] 无场景文件 — 建议添加场景")
             return self._complete(state, "验证跳过: 无场景文件")
 
         # 全部通过
         state.verification.status = VerificationStatus.PASSED
         state.verification.summary = f"All {len(scenario_results)} scenarios passed"
         state.verification.total_assertions = sum(
-            getattr(r, 'total_assertions', 0) for r in scenario_results
+            getattr(r, 'assertions_total', 0) for r in scenario_results
         )
         state.verification.passed_assertions = state.verification.total_assertions
         state.task_state.notes.append("[VERIFY] 全部验证通过")
 
-        # ── 记忆效果自动评估 ──
         self._evaluate_memory_effectiveness(state, success=True)
 
-        logger.info("Verification passed: %d scenarios, %d assertions",
-                     len(scenario_results), state.verification.total_assertions)
+        # 3.5. 覆盖率门禁 — 场景全过但代码覆盖率够吗？
+        self._check_coverage(state)
+
+        # 4. ReportGenerator — 生成测试报告
+        self._generate_report(state, report=None, scenario_results=scenario_results)
+
+        self._cleanup(state, service_manager)
+
+        logger.info("Verification passed: %d scenarios", len(scenario_results))
         return self._complete(state, f"验证通过: {state.verification.summary}")
 
-    def _evaluate_memory_effectiveness(self, state: RunState, success: bool) -> None:
-        """VERIFY 阶段自动评估注入记忆的效果。
+    # ── Cleanup ──
 
-        - 验证通过 → 注入的记忆标记 effective（修复规则被正确应用）
-        - 验证失败 → 注入的记忆标记 ineffective（本该用但被忽略）
-        """
+    def _cleanup(self, state: RunState, service_manager=None) -> None:
+        """停止服务 + 生成报告。"""
+        if service_manager:
+            try:
+                service_manager.stop_all()
+                state.task_state.notes.append("[VERIFY] 服务已停止")
+            except Exception as exc:
+                logger.warning("Service stop failed: %s", exc)
+
+    # ── Report ──
+
+    def _generate_report(
+        self, state: RunState, report, scenario_results: list,
+    ) -> None:
+        """生成 HTML/JSON/MD 测试报告。"""
         try:
-            from engines.memory.store import MemoryStore
-            store = MemoryStore(project_root=state.project_root)
-            store.load_index()
+            from pathlib import Path
+            from engines.scenario.report_generator import ReportGenerator
+            from engines.scenario.runner import ScenarioReport
 
-            # 从 run_state 获取本任务注入的记忆 ID 列表
-            injected_ids = state.metadata.get("injected_memory_ids", [])
-            if not injected_ids:
+            # 构造 ScenarioReport
+            if report is None:
+                sr = ScenarioReport()
+                for r in scenario_results:
+                    sr.add(r)
+                report = sr
+
+            gen = ReportGenerator(
+                Path(state.project_root) / ".ai" / "reports"
+            )
+            paths = gen.generate(
+                report,
+                failures=[
+                    {"category": f.category.value, "message": f.message}
+                    for f in state.failures[-10:]
+                ],
+            )
+            state.metadata["test_report_paths"] = paths
+            state.task_state.notes.append(
+                f"[VERIFY] 测试报告: {paths.get('html', '')}"
+            )
+        except Exception as exc:
+            logger.warning("Report generation failed: %s", exc)
+
+    def _check_coverage(self, state: RunState) -> None:
+        """场景全过后，检查变更文件的代码覆盖率。低于阈值 → 标记为建议补充测试。"""
+        try:
+            import re
+            import subprocess
+            from pathlib import Path
+
+            project_root = Path(state.project_root) if state.project_root else Path.cwd()
+            changed_files = []
+            for log in state.task_state.task_logs:
+                changed_files.extend(log.changed_files)
+
+            if not changed_files:
                 return
 
-            updated = 0
-            for mem_id in injected_ids:
-                store.record_effectiveness(mem_id, effective=success)
-                updated += 1
+            # 按语言检测覆盖率工具
+            cov_threshold = 0.70
 
-            if updated:
-                label = "effective" if success else "ineffective"
-                state.task_state.notes.append(
-                    f"[VERIFY] 记忆效果评估: {updated} 条标记为 {label}"
+            # Python: pytest-cov
+            py_files = [f for f in changed_files if f.endswith(".py")]
+            if py_files:
+                result = subprocess.run(
+                    ["python", "-m", "pytest", "--cov", "--cov-report=term-missing"]
+                    + [str(project_root / f) for f in py_files[:10]],
+                    capture_output=True, text=True, cwd=str(project_root),
+                    timeout=60,
                 )
-                logger.info("Memory effectiveness: %d entries marked %s", updated, label)
+                # 解析 TOTAL 行: "TOTAL    45    10    78%"
+                match = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", result.stdout)
+                if match:
+                    pct = int(match.group(1)) / 100.0
+                    if pct < cov_threshold:
+                        state.metadata["coverage_warning"] = f"Python 覆盖率 {pct:.0%} < {cov_threshold:.0%}，建议补充测试"
+                        state.task_state.notes.append(f"[VERIFY] ⚠️ {state.metadata['coverage_warning']}")
+                    else:
+                        state.task_state.notes.append(f"[VERIFY] 覆盖率 {pct:.0%} ✅")
+
+            # JavaScript/TypeScript: jest --coverage
+            js_files = [f for f in changed_files if f.endswith((".js", ".ts", ".tsx"))]
+            if js_files:
+                # 只检查 jest config 是否存在
+                if (project_root / "jest.config.js").exists() or (project_root / "jest.config.ts").exists():
+                    result = subprocess.run(
+                        ["npx", "jest", "--coverage", "--collectCoverageFrom", " ".join(js_files[:10])],
+                        capture_output=True, text=True, cwd=str(project_root), timeout=60,
+                    )
+                    match = re.search(r"All files\s+\|\s+([\d.]+)\s+\|\s+([\d.]+)\s+\|\s+([\d.]+)", result.stdout)
+                    if match:
+                        pct = float(match.group(3)) / 100.0
+                        if pct < cov_threshold:
+                            state.metadata["coverage_warning"] = f"JS 覆盖率 {pct:.0%} < {cov_threshold:.0%}，建议补充测试"
+                            state.task_state.notes.append(f"[VERIFY] ⚠️ {state.metadata['coverage_warning']}")
+                        else:
+                            state.task_state.notes.append(f"[VERIFY] 覆盖率 {pct:.0%} ✅")
+
+        except FileNotFoundError:
+            logger.debug("Coverage tool not available")
         except Exception as exc:
-            logger.warning("Memory effectiveness evaluation failed: %s", exc)
+            logger.debug("Coverage check skipped: %s", exc)
+
+    def _evaluate_memory_effectiveness(self, state: RunState, success: bool) -> None:
+        """效果追踪已移除。记忆效果通过 git diff 人工审核判断。"""
+        pass
 
     @staticmethod
     def _load_sanity_check_items(state: RunState) -> list:
-        """从项目配置加载 Sanity 检查项，fallback 到默认值。
+        """从 loop-config.json data_sources + MCP 配置生成中间件端口检查项。
 
-        检查 .ai/loop-config.json 中的 sanity_checks 字段，
-        如果未配置则使用合理默认（localhost 常见端口）。
+        HTTP 服务由 ServiceManager 负责启停和健康检查，不在这里重复。
+        这里只检查外部中间件（MySQL/Redis/...）的端口可达性。
         """
+        import json
         from pathlib import Path
         from engines.scenario.models import SanityCheckItem
 
         project_root = Path(state.project_root) if state.project_root else Path.cwd()
-        config_path = project_root / ".ai" / "loop-config.json"
+        items: list = []
 
-        if config_path.exists():
+        # ── 用户显式配置的 sanity_checks（最高优先级）──
+        loop_config_path = project_root / ".ai" / "loop-config.json"
+        loop_cfg: dict = {}
+        if loop_config_path.exists():
             try:
-                import json
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                items_config = config.get("sanity_checks", [])
-                if items_config:
-                    return [
-                        SanityCheckItem(**item) for item in items_config
-                    ]
+                loop_cfg = json.loads(loop_config_path.read_text(encoding="utf-8"))
+                user_checks = loop_cfg.get("sanity_checks", [])
+                if user_checks:
+                    return [SanityCheckItem(**item) for item in user_checks]
             except Exception:
-                pass  # fallback to defaults
+                pass
 
-        # 默认检查项（常见配置）
-        return [
-            SanityCheckItem(name="http-local", resource="http", target="http://localhost:8080"),
-            SanityCheckItem(name="port-3306", resource="port", target="localhost:3306"),
-            SanityCheckItem(name="port-6379", resource="port", target="localhost:6379"),
-        ]
+        # ── data_sources 中间件检查 — 从 loop-config.json data_sources 获取 host:port ──
+        data_sources = loop_cfg.get("data_sources", {})
+        # 从 Adapter 类动态获取默认端口（内置 + 项目级扩展）
+        type_default_ports = _build_adapter_port_map(project_root)
+        for ds_name, ds_cfg in data_sources.items():
+            if not isinstance(ds_cfg, dict):
+                continue
+            host = ds_cfg.get("host")
+            if not host:
+                continue
+            ds_type = ds_cfg.get("type", "")
+            port = ds_cfg.get("port", type_default_ports.get(ds_type, 0))
+            items.append(SanityCheckItem(
+                name=f"ds-{ds_name}",
+                resource="port",
+                target=f"{host}:{port}",
+                required=True,
+            ))
+
+        # ── MCP 中间件检查（fallback）— 从 mcp.json env 拿 host:port ──
+        mcp_path = _find_mcp_json(project_root)
+        if mcp_path:
+            try:
+                mcp_cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+                servers = mcp_cfg.get("mcpServers", {})
+            except Exception:
+                servers = {}
+
+            known = {
+                "MYSQL_HOST":      ("MYSQL_PORT", 3306),
+                "PG_HOST":         ("PG_PORT", 5432),
+                "REDIS_HOST":      ("REDIS_PORT", 6379),
+                "MONGO_HOST":      ("MONGO_PORT", 27017),
+                "ES_HOST":         ("ES_PORT", 9200),
+                "RABBITMQ_HOST":   ("RABBITMQ_PORT", 5672),
+            }
+            for server_name, cfg in servers.items():
+                if not isinstance(cfg, dict) or cfg.get("disabled"):
+                    continue
+                env_vars = cfg.get("env", {})
+                for host_key, (port_key, default_port) in known.items():
+                    host = env_vars.get(host_key)
+                    if host:
+                        port = env_vars.get(port_key, str(default_port))
+                        items.append(SanityCheckItem(
+                            name=f"mcp-{server_name}",
+                            resource="port",
+                            target=f"{host}:{port}",
+                            required=True,
+                        ))
+                        break  # 一个 server 只加一条
+
+        return items
 
     @staticmethod
-    def _load_scenarios(project_root) -> list:
-        """Load Scenario objects from .ai/scenarios/*.yaml files."""
+    def _load_scenarios(state) -> list:
+        """Load Scenario objects from .ai/scenarios/**/*.yaml files.
+
+        子目录解析优先级（由高到低）:
+        1. state.metadata["scenario_dir"] — 手动 --scenario-dir 或 TEST_DESIGN 自动记录
+        2. state.metadata["scenario_dirs"] — 多个子目录时，从 changed_files 推断模块匹配
+        3. changed_files → 推断模块 → 检查同名子目录是否存在
+        4. changed_files → 推断模块 → 按场景 id/name 模糊匹配
+        5. 以上全无 → 加载全部（等同 --all）
+        6. 推断结果为空 → fallback 加载全部
+        """
         import json
         from pathlib import Path
-        scenarios_dir = Path(project_root) / ".ai" / "scenarios"
-        if not scenarios_dir.is_dir():
+
+        project_root = state.project_root if hasattr(state, 'project_root') else state
+        if isinstance(project_root, str):
+            project_root = Path(project_root)
+
+        base_dir = Path(project_root) / ".ai" / "scenarios"
+        if not base_dir.is_dir():
             return []
 
+        meta = state.metadata if hasattr(state, 'metadata') else {}
+        meta = meta or {}
+
+        # ── 解析目标子目录 ──
+        target_dir = base_dir  # 默认扫描根目录
+        subdir = ""
+
+        # 1. 单子目录（手动 --scenario-dir 或 TEST_DESIGN 自动记录）
+        explicit = meta.get("scenario_dir", "")
+        if explicit:
+            candidate = base_dir / explicit
+            if candidate.is_dir():
+                target_dir = candidate
+                subdir = explicit
+            else:
+                logger.warning("Scenario dir not found: %s, fallback to all", candidate)
+
+        # 2. 多子目录 → 从 changed_files 推断匹配
+        if not subdir:
+            scenario_dirs = meta.get("scenario_dirs", [])
+            if scenario_dirs:
+                module = _infer_module_from_state(state)
+                if module:
+                    matched = [d for d in scenario_dirs if d == module]
+                    if not matched:
+                        matched = [d for d in scenario_dirs if module in d or d in module]
+                    if len(matched) == 1:
+                        target_dir = base_dir / matched[0]
+                        subdir = matched[0]
+                        logger.info("Matched scenario dir: %s", subdir)
+
+        # 3. 从 changed_files 推断模块，检查同名子目录
+        if not subdir:
+            module = _infer_module_from_state(state)
+            if module:
+                module_dir = base_dir / module
+                if module_dir.is_dir() and any(module_dir.rglob("*.yaml")):
+                    target_dir = module_dir
+                    subdir = module
+                    logger.info("Auto-detected subdir: .ai/scenarios/%s/", module)
+
+        # ── 加载场景 ──
+        # 4. 无子目录匹配 → 按场景 id/name 模糊匹配
+        related_ids: set[str] = set()
+        if not subdir:
+            module = _infer_module_from_state(state)  # 可能已有，但轻量
+            if module:
+                related_ids = set(
+                    RepairHandler._find_related_scenarios(state, module)
+                )
+
         loaded = []
-        for yaml_file in sorted(scenarios_dir.glob("*.yaml")):
+        for yaml_file in sorted(target_dir.rglob("*.yaml")):
             try:
-                # Simple YAML parsing without PyYAML dependency
                 import yaml
                 with open(yaml_file, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
             except ImportError:
-                # JSON fallback
                 try:
                     with open(yaml_file, encoding="utf-8") as f:
                         data = json.load(f)
@@ -1591,13 +2156,61 @@ class VerifyHandler(StageHandler):
                 logger.warning("Failed to load scenario %s: %s", yaml_file.name, exc)
                 continue
 
-            if isinstance(data, dict):
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
                 try:
                     from engines.scenario.models import Scenario
-                    scenario = Scenario(**data)
+                    scenario = Scenario(**item)
+                    # 名称过滤：仅在没有子目录匹配时才生效
+                    if related_ids and scenario.id not in related_ids and scenario.name not in related_ids:
+                        continue
                     loaded.append(scenario)
                 except Exception as exc:
                     logger.warning("Invalid scenario in %s: %s", yaml_file.name, exc)
+
+        # fallback: 推断过滤结果为空 → 加载全部
+        if (related_ids or subdir) and not loaded:
+            logger.info("Filtered scenarios returned empty, loading all")
+            return VerifyHandler._load_scenarios_raw(project_root)
+
+        return loaded
+
+    @staticmethod
+    def _load_scenarios_raw(project_root) -> list:
+        """加载全部 Scenario（无过滤），供 fallback 使用。"""
+        import json
+        from pathlib import Path
+
+        scenarios_dir = Path(project_root) / ".ai" / "scenarios"
+        if not scenarios_dir.is_dir():
+            return []
+
+        loaded = []
+        for yaml_file in sorted(scenarios_dir.rglob("*.yaml")):
+            try:
+                import yaml
+                with open(yaml_file, encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+            except ImportError:
+                try:
+                    with open(yaml_file, encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    from engines.scenario.models import Scenario
+                    loaded.append(Scenario(**item))
+                except Exception:
+                    pass
 
         return loaded
 
@@ -1618,23 +2231,72 @@ class RepairHandler(StageHandler):
     """
 
     stage = StageType.REPAIR
-    MAX_REPAIR_RETRIES = 3
+    _DEFAULT_MAX_RETRIES = 3
+
+    # ── 反篡改计数器 ──
+    # retry_count 存在 run.json 里，AI 删文件就能重置。
+    # 这里额外维护 .ai/.retry_state，独立于 run.json，删不掉。
+    _RETRY_STATE_DIR = ".ai"
+    _RETRY_STATE_FILE = ".retry_state"
+
+    @classmethod
+    def _get_max_retries(cls, state: RunState) -> int:
+        """从 loop-config.json 读取 max_repair_retries，默认 3。"""
+        import json
+        from pathlib import Path
+        root = state.project_root or "."
+        config_path = Path(root) / ".ai" / "loop-config.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            return int(config.get("max_repair_retries", cls._DEFAULT_MAX_RETRIES))
+        except Exception:
+            return cls._DEFAULT_MAX_RETRIES
+
+    @classmethod
+    def _read_retry_count(cls, state: RunState) -> int:
+        """读取反篡改计数器（独立于 run.json，按 task_id 隔离）。"""
+        import json
+        from pathlib import Path
+        root = Path(state.project_root or ".")
+        counter_file = root / cls._RETRY_STATE_DIR / cls._RETRY_STATE_FILE
+        try:
+            data = json.loads(counter_file.read_text(encoding="utf-8"))
+            # 不同任务 → 重置计数
+            if data.get("task_id") != state.task_id:
+                return 0
+            return int(data.get("retry_count", 0))
+        except Exception:
+            return 0
+
+    @classmethod
+    def _write_retry_count(cls, state: RunState, count: int) -> None:
+        """写入反篡改计数器。"""
+        import json
+        from pathlib import Path
+        root = Path(state.project_root or ".")
+        counter_file = root / cls._RETRY_STATE_DIR / cls._RETRY_STATE_FILE
+        counter_file.parent.mkdir(parents=True, exist_ok=True)
+        counter_file.write_text(
+            json.dumps({"retry_count": count, "task_id": state.task_id}, indent=2),
+            encoding="utf-8",
+        )
 
     def handle(self, state: RunState) -> RunState:
+        """处理 REPAIR 阶段：分析失败，构造修复 prompt 或校验修复结果。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         logger.info("Repair — analyzing failures and loading context")
 
         state.task_state.status = state.task_state.status.__class__.REPAIRING
         state.task_state.stage = StageType.REPAIR
 
-        # 1. 检查重试次数
-        if state.task_state.retry_count >= self.MAX_REPAIR_RETRIES:
-            logger.error("Repair retry limit (%d) exceeded", self.MAX_REPAIR_RETRIES)
-            state.task_state.notes.append(
-                f"[REPAIR] 超过最大重试次数 {self.MAX_REPAIR_RETRIES}, 升级给用户"
-            )
-            return self._stop_failure(state, f"修复失败: 超过 {self.MAX_REPAIR_RETRIES} 次重试")
-
-        state.task_state.retry_count += 1
+        max_retries = self._get_max_retries(state)
+        state.metadata["repair_max_retries"] = max_retries
 
         # 2. 分析最近的 FailureRecord
         if state.failures:
@@ -1654,7 +2316,7 @@ class RepairHandler(StageHandler):
             logger.info("Latest failure [%s]: %s", latest.category.value, latest.message[:120])
         else:
             state.task_state.notes.append(
-                f"[REPAIR] attempt={state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}, 无 failure 记录"
+                f"[REPAIR] attempt={state.task_state.retry_count}/{max_retries}, 无 failure 记录"
             )
 
         # ── Phase VALIDATE: AI 已提交修复结果 ──
@@ -1662,36 +2324,58 @@ class RepairHandler(StageHandler):
         if submitted and isinstance(submitted, dict):
             return self._validate_repair_result(state, submitted)
 
-        # ── Phase PREPARE: 构造修复 prompt ──
+        # ── Phase PREPARE: 检查重试次数 + 构造修复 prompt ──
+        max_retries = state.metadata.get("repair_max_retries", 3)
+        persistent_count = self._read_retry_count(state)
+        effective_count = max(state.task_state.retry_count, persistent_count)
+
+        if effective_count >= max_retries:
+            logger.error("Repair retry limit (%d) exceeded (effective=%d)", max_retries, effective_count)
+            state.task_state.notes.append(
+                f"[REPAIR] 超过最大重试次数 {max_retries}, 升级给用户"
+            )
+            return self._stop_failure(state, f"修复失败: 超过 {max_retries} 次重试")
+
+        effective_count += 1
+        state.task_state.retry_count = effective_count
+        self._write_retry_count(state, effective_count)
+        state.metadata["repair_effective_count"] = effective_count
+
         return self._prepare_repair(state)
 
     def _prepare_repair(self, state: RunState) -> RunState:
-        """构造修复 prompt，注入失败上下文 + preflight warnings。"""
-        # 1. 通过 ContextRouter 加载失败相关上下文
+        """构造修复 prompt，注入失败上下文 + 服务日志路径 + preflight warnings。"""
+        # AI 自行使用 Read / CodeGraph MCP 获取上下文
         repair_context = ""
-        try:
-            from engines.context.router import ContextRouter
-            router = ContextRouter(state.project_root)
-            bundle = router.route(stage=StageType.REPAIR, run_state=state)
-            if bundle and bundle.pieces:
-                repair_context = bundle.render()
-                state.task_state.notes.append(
-                    f"[REPAIR context] tokens={bundle.total_tokens}, "
-                    f"files={len(bundle.pieces)}"
-                )
-        except Exception as exc:
-            logger.warning("ContextRouter failed for REPAIR: %s", exc)
-            state.task_state.notes.append(f"[REPAIR] ContextRouter 不可用: {exc}")
 
-        # 2. 构建失败摘要
+        # 1. 构建失败摘要（含结构化修复上下文）
         failure_text = "**Recent Failures:**\n"
-        if state.failures:
+        repair_contexts = state.metadata.get("repair_contexts", [])
+        if repair_contexts:
+            for rc in repair_contexts:
+                failure_text += f"\n### Scenario: {rc.get('scenario_id', '?')} ({rc.get('failure_category', '?')})\n"
+                failure_text += f"Summary: {rc.get('summary', '')}\n"
+                for hint in rc.get("repair_hints", [])[:5]:
+                    failure_text += (
+                        f"- [{hint.get('type', '?')}] {hint.get('hint', '')}\n"
+                        f"  expected={hint.get('expected')}, actual={hint.get('actual')}\n"
+                    )
+        elif state.failures:
             for f in state.failures[-3:]:
-                failure_text += f"- [{f.category.value}] {f.message[:150]}\n"
+                failure_text += f"- [{f.category.value}] {f.message[:200]}\n"
         else:
             failure_text += "(无详细 failure 记录)\n"
 
-        # 3. Preflight warnings — 修复时更需要历史教训
+        # 1.5. 服务日志引用（已过滤 + 截断，≤3000 字符）
+        service_log_info = ""
+        log_snippet = state.metadata.get("service_log_snippet", "")
+        if log_snippet:
+            service_log_info = (
+                f"\n**服务错误日志 (已过滤关键行):**\n```\n{log_snippet}\n```\n"
+                f"完整日志: Read .ai/logs/*.log\n"
+            )
+
+        # 3. Preflight warnings
         preflight = self._load_preflight_warnings(state)
 
         # 4. 变更文件列表
@@ -1700,24 +2384,40 @@ class RepairHandler(StageHandler):
             changed_files.extend(cp.files_changed)
         changed_files = list(dict.fromkeys(changed_files))
 
+        effective_count = state.metadata.get("repair_effective_count", 1)
+        max_retries = state.metadata.get("repair_max_retries", 3)
+
         instruction_parts = [
-            f"修复尝试 {state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}",
+            f"修复尝试 {effective_count}/{max_retries} (达上限后停止，不可重置)",
             "",
             failure_text,
         ]
+        # 2. 数据源信息（AI 可查询验证数据是否存在）
+        ds_info = self._build_data_source_info(state)
+        if ds_info:
+            instruction_parts.append(ds_info)
+
+        if service_log_info:
+            instruction_parts.append(service_log_info)
+
         if changed_files:
             instruction_parts.append(f"**变更过的文件:** {changed_files}")
         if preflight:
             instruction_parts.extend(["", "## 历史教训 (避免重犯)", *preflight])
         instruction_parts.extend([
             "",
-            "## 约束",
-            "- 分析根因，最小修复（≤ 30 行变更）",
-            "- 不修改 scenario 定义文件",
-            "- 不删除或削弱已有测试断言",
-            "- 修复后运行对应测试确认通过",
+            "## 步骤（按顺序）",
+            "1. 先查表结构: data query --source <name> --target \"SHOW COLUMNS FROM table\"",
+            "2. 再查数据:   data query --source <name> --target \"SELECT * FROM table LIMIT 5\"",
+            "3. 确认数据缺失后用 data execute 补齐",
+            "4. 如数据存在但接口报错 → 读 .ai/logs/*.log 定位异常堆栈，修复代码",
+            "5. 提交前运行对应测试确认通过",
             "",
-            "提交格式: {\"changed_files\": [...], \"summary\": \"...\", \"root_cause\": \"...\"}",
+            "## 约束",
+            "- 禁止猜列名/表名，必须先 SHOW COLUMNS / SELECT * LIMIT 1 确认结构",
+            "- 不要从日志 SQL 输出推断数据存在性，必须实际查询数据库",
+            "- 最小修复（≤ 50 行变更），不修改 scenario 定义文件",
+            "- 提交格式: {\"changed_files\": [...], \"summary\": \"...\", \"root_cause\": \"...\"}",
         ])
 
         state.pending_action = "repair"
@@ -1730,6 +2430,9 @@ class RepairHandler(StageHandler):
                 for f in (state.failures or [])[-5:]
             ],
             "changed_files": changed_files,
+            "repair_contexts": repair_contexts[-3:] if repair_contexts else [],
+            "service_log_tail_lines": 20,
+            "service_log_hint": "完整日志在 .ai/logs/*.log，用 Read 工具查看",
             "repair_constraints": {
                 "max_files": 3,
                 "max_lines": 50,
@@ -1744,10 +2447,58 @@ class RepairHandler(StageHandler):
         logger.info("Repair prompt ready, waiting for AI fix")
         return state
 
+    @staticmethod
+    @staticmethod
+    def _build_data_source_info(state: RunState) -> str:
+        """读取数据源配置，生成查询提示，供 AI 验证数据是否存在。"""
+        import json
+        from pathlib import Path
+
+        root = state.project_root or "."
+        config_path = Path(root) / ".ai" / "loop-config.json"
+        if not config_path.exists():
+            return ""
+
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+
+        data_sources = config.get("data_sources", {})
+        if not data_sources:
+            return ""
+
+        lines = [
+            "",
+            "## 数据源操作",
+            "查询: engines/run.sh data query  --source <name> --target \"<SQL/key>\"",
+            "写入: engines/run.sh data execute --source <name> --target \"<SQL/key>\" --value \"<value>\"",
+            "",
+            "已配置的数据源:",
+        ]
+        for name, ds in data_sources.items():
+            ds_type = ds.get("type", "")
+            host = ds.get("host", "")
+            port = ds.get("port", "")
+            database = ds.get("database", "")
+            label = f"{ds_type}://{host}:{port}"
+            if database:
+                label += f"/{database}"
+            examples: dict[str, str] = {
+                "mysql":    f'--target "SELECT * FROM table"',
+                "redis":    f'--target "key" 或 --target "key:*" 查所有匹配',
+                "mongodb":  f'--target \'{{"find": "coll", "filter": {{}}}}\'',
+                "rabbitmq": f'--target "queue_name"',
+            }
+            hint = examples.get(ds_type, f'--target "..."')
+            lines.append(f"  {name} ({label})  例: {hint}")
+
+        return "\n".join(lines)
+
     def _validate_repair_result(
         self, state: RunState, submitted: dict,
     ) -> RunState:
-        """校验 AI 修复结果。"""
+        """校验 AI 修复结果 + 回归影响分析（Test-Fixing Skill 思路）。"""
         changed_files = submitted.get("changed_files", [])
         summary = submitted.get("summary", "")
         root_cause = submitted.get("root_cause", "")
@@ -1771,7 +2522,20 @@ class RepairHandler(StageHandler):
             f"root_cause={root_cause[:100]}, summary={summary[:100]}"
         )
 
-        # 4. 清理并进入 VERIFY
+        # 4. 交叉影响分析（Test-Fixing Skill 思路）
+        # 修复后需要复测的不只是报错的那个 Scenario，而是所有相关模块的 Scenario
+        module = self._infer_module(changed_files)
+        if module:
+            related = self._find_related_scenarios(state, module)
+            state.metadata["repair_related_scenarios"] = related
+            state.task_state.notes.append(
+                f"[REPAIR] 交叉影响分析: 模块 '{module}' 关联 {len(related)} 个 Scenario, "
+                f"复测时将全量验证以防止回归"
+            )
+        else:
+            state.metadata["repair_related_scenarios"] = []
+
+        # 5. 清理并进入 VERIFY
         state.needs_ai_input = False
         state.pending_action = ""
         state.metadata.pop("repair_result", None)
@@ -1781,6 +2545,128 @@ class RepairHandler(StageHandler):
             state, StageType.VERIFY,
             f"修复 applied (attempt {state.task_state.retry_count}), 重新验证",
         )
+
+    @staticmethod
+    def _infer_module(changed_files: list[str]) -> str:
+        """从变更文件路径推断所属模块。"""
+        for f in changed_files:
+            parts = f.replace("\\", "/").split("/")
+            # 找 src/ 后的第一级目录作为模块名
+            if "src" in parts:
+                idx = parts.index("src")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+            # 或直接用第一级目录
+            if len(parts) > 1:
+                return parts[0]
+        return ""
+
+    @staticmethod
+    def _find_related_scenarios(state: RunState, module: str) -> list[str]:
+        """找到与修改模块相关的所有 Scenario。"""
+        try:
+            import json
+            from pathlib import Path
+
+            project_root = Path(state.project_root) if state.project_root else Path.cwd()
+            scenarios_dir = project_root / ".ai" / "scenarios"
+            if not scenarios_dir.is_dir():
+                return []
+
+            related: list[str] = []
+            for yaml_file in sorted(scenarios_dir.rglob("*.yaml")):
+                try:
+                    import yaml as _yaml
+                    data = _yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+
+                if not isinstance(data, dict):
+                    continue
+
+                # 检查 scenario 的 id/name/steps 是否含相关模块关键词
+                scenario_id = str(data.get("id", ""))
+                name = str(data.get("name", ""))
+                steps = data.get("steps", [])
+
+                module_lower = module.lower()
+                if (module_lower in scenario_id.lower()
+                    or module_lower in name.lower()
+                    or any(
+                        module_lower in str(s.get("config", {})).lower()
+                        for s in steps
+                    )):
+                    related.append(scenario_id or name or yaml_file.stem)
+
+            return related
+        except Exception:
+            return []
+
+
+class GateHandler(StageHandler):
+    """机械门禁处理器 —— 纯 Python Layer1 检查，不调 AI。
+
+    在 SDD 完成执行后、VERIFY 之前运行。
+    只做确定性检测：SecretScan / TestIntegrity / ScopeBoundary / SkipDetection。
+    通过 → 推进 VERIFY，拦截 → 返回 violations 列表。
+    """
+
+    stage = StageType.GATE
+
+    def handle(self, state: RunState) -> RunState:
+        """运行 Layer1 机械检查，通过则推进。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
+        state.task_state.stage = StageType.GATE
+        logger.info("Gate — Layer1 mechanical checks")
+
+        violations: list[str] = []
+        warnings: list[str] = []
+
+        try:
+            from engines.review.engine import ReviewEngine
+
+            review = ReviewEngine()
+            layer1_results = review.run_layer1(state)
+            blocked = any(r.block for r in layer1_results)
+            passed_count = sum(1 for r in layer1_results if r.passed)
+            state.task_state.notes.append(
+                f"[GATE] Layer1: {passed_count}/{len(layer1_results)} passed, "
+                f"blocked={blocked}"
+            )
+
+            if blocked:
+                violations.append(
+                    f"Gate blocked: {[r.reason for r in layer1_results if r.block]}"
+                )
+            for r in layer1_results:
+                if r.severity.value == "warn":
+                    warnings.append(f"Gate warn [{r.rule_name}]: {r.reason}")
+        except Exception as exc:
+            logger.warning("Gate Layer1 check failed: %s", exc)
+            state.task_state.notes.append(f"[GATE] Layer1 异常，放行: {exc}")
+
+        # 记录结果
+        state.metadata["gate_report"] = {
+            "violations": violations,
+            "warnings": warnings,
+        }
+
+        if violations:
+            state.task_state.notes.append(
+                f"[GATE] BLOCKED — {len(violations)} violations: {violations}"
+            )
+            return self._stop_failure(state, "; ".join(violations))
+
+        state.task_state.notes.append(
+            f"[GATE] PASSED — {len(warnings)} warnings"
+        )
+        return self._complete(state, "Gate passed")
 
 
 class ReviewHandler(StageHandler):
@@ -1799,6 +2685,14 @@ class ReviewHandler(StageHandler):
     MAX_REVIEW_RETRIES = 3
 
     def handle(self, state: RunState) -> RunState:
+        """处理 REVIEW 阶段：运行两层审查，支持自动修复循环。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         logger.info("Review — two-layer review (Layer1 deterministic + Layer2 AI semantic)")
 
         self._plan_warnings: list[str] = []
@@ -1826,12 +2720,12 @@ class ReviewHandler(StageHandler):
     # ═══════════════════════════════════════════════════════════════
 
     def _prepare_review(self, state: RunState) -> RunState:
-        """PREPARE: Layer1 检查 + Plan 合规 + 构建 AI 审查 prompt。"""
+        """PREPARE: Layer1 检查 + Plan 合规 + 指令 AI 调用 /aicode-review。"""
         violations: list[str] = []
         warnings: list[str] = []
 
-        # 1. Layer1: Python 规则检查（跑一次，结果同时用于 violations 列表和 AI prompt）
-        layer1_violations, layer1_warnings, layer1_result = self._run_layer1_checks(state)
+        # 1. Layer1: Python 规则检查
+        layer1_violations, layer1_warnings, _layer1_result = self._run_layer1_checks(state)
         violations.extend(layer1_violations)
         warnings.extend(layer1_warnings)
 
@@ -1847,22 +2741,7 @@ class ReviewHandler(StageHandler):
         # 4. Task Execution Log 汇总
         task_summary = self._summarize_task_logs(state)
 
-        # 5. 获取 git diff
-        diff_text = self._get_git_diff(state)
-
-        # 6. 构建 AI 审查 prompt（复用 Layer1 结果，不再重复 check）
-        try:
-            from engines.review.engine import ReviewEngine
-
-            review_engine = ReviewEngine()
-            if layer1_result is None:
-                layer1_result = review_engine.check(state)
-            ai_prompt = review_engine.build_ai_review_prompt(state, diff_text, layer1_result)
-        except Exception as exc:
-            logger.warning("Failed to build AI review prompt: %s", exc)
-            ai_prompt = self._build_fallback_review_prompt(state, diff_text, violations, warnings)
-
-        # 7. 记录 Layer1 结果
+        # 5. 记录 Layer1 结果
         state.metadata["review_report"] = {
             "layer1_violations": violations,
             "layer1_warnings": warnings,
@@ -1870,10 +2749,22 @@ class ReviewHandler(StageHandler):
         }
         state.metadata["review_meta"] = {"retry_count": 0, "layer1_blocked": len(violations) > 0}
 
-        # 8. 设置 AI review 请求
+        # 6. 指令 AI 调用 /aicode-review skill 做 6 维深度审查
+        layer1_summary = (
+            f"Layer1 结果: {len(violations)} violations, {len(warnings)} warnings"
+        )
+        if violations:
+            layer1_summary += f"\nViolations: {', '.join(violations[:5])}"
+        if warnings:
+            layer1_summary += f"\nWarnings: {', '.join(warnings[:5])}"
+
         state.pending_action = "review"
         state.pending_prompt = {
-            "instruction": ai_prompt,
+            "instruction": (
+                f"请执行 /aicode-review，对当前所有变更进行 6 维深度审查。\n\n"
+                f"{layer1_summary}\n\n"
+                "审查完成后返回结构化结果。"
+            ),
             "layer1_violations": violations,
             "layer1_warnings": warnings,
         }
@@ -1881,9 +2772,9 @@ class ReviewHandler(StageHandler):
 
         state.task_state.notes.append(
             f"[REVIEW] PREPARE: Layer1 → {len(violations)} violations, "
-            f"{len(warnings)} warnings → AI 深度审查"
+            f"{len(warnings)} warnings → AI 执行 /aicode-review"
         )
-        logger.info("Review PREPARE: AI review prompt ready (%d chars)", len(ai_prompt))
+        logger.info("Review PREPARE: instructing AI to run /aicode-review")
         return state
 
     # ═══════════════════════════════════════════════════════════════
@@ -1893,20 +2784,36 @@ class ReviewHandler(StageHandler):
     def _validate_review(
         self, state: RunState, ai_result: dict, retry_count: int
     ) -> RunState:
-        """VALIDATE: 解析 AI 审查结果 → 决定是否需要修复。"""
+        """VALIDATE: 解析 AI 审查结果 → 决定是否需要修复。
+
+        支持新旧两种严重级别：
+        - 新（6维审查）: Critical / Important → 阻断；Minor → 放行
+        - 旧（Layer1）：BLOCK → 阻断；WARN → 放行
+        """
         # 清理 metadata 中的 AI 结果（避免重复处理）
         state.metadata.pop("review_ai_result", None)
 
         passed = ai_result.get("passed", True)
         ai_violations = ai_result.get("violations", [])
         summary = ai_result.get("summary", "")
+        critical_count = ai_result.get("critical_count", 0)
+        important_count = ai_result.get("important_count", 0)
+        minor_count = ai_result.get("minor_count", 0)
 
-        block_violations = [v for v in ai_violations if v.get("severity") == "BLOCK"]
-        warn_violations = [v for v in ai_violations if v.get("severity") == "WARN"]
+        # Critical / Important / BLOCK → 需要修复
+        block_violations = [
+            v for v in ai_violations
+            if v.get("severity") in ("Critical", "Important", "BLOCK")
+        ]
+        # Minor / WARN → 记录但不阻断
+        minor_violations = [
+            v for v in ai_violations
+            if v.get("severity") in ("Minor", "WARN")
+        ]
 
         state.task_state.notes.append(
             f"[REVIEW] AI 审查: passed={passed}, "
-            f"BLOCK={len(block_violations)}, WARN={len(warn_violations)}"
+            f"Critical={critical_count}, Important={important_count}, Minor={minor_count}"
         )
 
         # 更新 review report
@@ -1914,25 +2821,32 @@ class ReviewHandler(StageHandler):
         report["ai_passed"] = passed
         report["ai_violations"] = ai_violations
         report["ai_summary"] = summary
+        report["critical_count"] = critical_count
+        report["important_count"] = important_count
+        report["minor_count"] = minor_count
 
         if passed and not block_violations:
             # 审查通过 → 推进到下一阶段
-            state.task_state.notes.append("[REVIEW] AI 审查通过")
-            logger.info("Review passed — advancing to next stage")
+            state.task_state.notes.append(
+                f"[REVIEW] AI 审查通过 ({minor_count} Minor 问题记录但不阻断)"
+            )
+            logger.info("Review passed — advancing to VERIFY")
             return self._finish_review(state)
 
-        # 有 BLOCK 违规 → 判断是否需要 AI 修复
+        # 有 Critical/Important/BLOCK 违规 → 判断是否需要 AI 修复
         if block_violations and retry_count < self.MAX_REVIEW_RETRIES:
+            # 显式更新 review_meta，不依赖 _request_fix 的副作用
+            state.metadata["review_meta"]["retry_count"] = retry_count + 1
             return self._request_fix(state, block_violations, retry_count)
 
-        # 重试次数耗尽 或 仅有 WARN → 记录并推进
+        # 重试次数耗尽 或 仅有 Minor → 记录并推进
         if retry_count >= self.MAX_REVIEW_RETRIES:
             state.task_state.notes.append(
-                f"[REVIEW] Auto-fix 重试 {retry_count} 次已达上限，带警告推进"
+                f"[REVIEW] Auto-fix 重试 {retry_count} 次已达上限，带 {len(block_violations)} 个违规推进"
             )
         else:
             state.task_state.notes.append(
-                f"[REVIEW] {len(warn_violations)} warnings (非阻断)，推进到下一阶段"
+                f"[REVIEW] {len(minor_violations)} Minor (非阻断)，推进到 VERIFY"
             )
 
         return self._finish_review(state)
@@ -2012,6 +2926,9 @@ class ReviewHandler(StageHandler):
 
         # Layer1 仍然失败 → 判断是否重试
         if retry_count < self.MAX_REVIEW_RETRIES:
+            new_retry = retry_count + 1
+            # 显式更新 review_meta，不依赖 _request_fix 的副作用
+            state.metadata["review_meta"]["retry_count"] = new_retry
             state.task_state.notes.append(
                 f"[REVIEW] Layer1 仍有 {len(layer1_violations)} violations, 继续修复"
             )
@@ -2043,6 +2960,9 @@ class ReviewHandler(StageHandler):
         warnings = report.get("layer1_warnings", [])
         task_summary = report.get("task_summary", "")
 
+        # ── 反馈闭环: 保存模块级发现，供后续 EXECUTE 警告 ──
+        self._save_review_findings(state, report)
+
         # 判断是否跳过 VERIFY（纯 docs/config 变更）
         if self._is_docs_only(state):
             state.task_state.notes.append("[REVIEW] 纯文档/配置变更，跳过 VERIFY → MEMORY")
@@ -2053,37 +2973,79 @@ class ReviewHandler(StageHandler):
             f"review: {len(violations)} violations, {len(warnings)} warnings, {task_summary}",
         )
 
+    def _save_review_findings(self, state: RunState, report: dict) -> None:
+        """将 REVIEW 发现按模块保存，供后续 EXECUTE 阶段警告。"""
+        ai_violations = report.get("ai_violations", [])
+        if not ai_violations:
+            return
+
+        findings_by_module: dict[str, list[str]] = state.metadata.get(
+            "review_findings_by_module", {},
+        )
+
+        for v in ai_violations:
+            file_path = v.get("file", "")
+            if not file_path:
+                continue
+            module = self._infer_module_from_file(file_path)
+            if not module:
+                continue
+            severity = v.get("severity", "Minor")
+            desc = v.get("description", "")
+            if module not in findings_by_module:
+                findings_by_module[module] = []
+            findings_by_module[module].append(f"[{severity}] {desc}")
+
+        if findings_by_module:
+            state.metadata["review_findings_by_module"] = findings_by_module
+            total = sum(len(v) for v in findings_by_module.values())
+            state.task_state.notes.append(
+                f"[REVIEW] 已记录 {total} 条模块级发现，后续 EXECUTE 将自动警告"
+            )
+
+    @staticmethod
+    def _infer_module_from_file(file_path: str) -> str:
+        parts = file_path.replace("\\", "/").split("/")
+        if "src" in parts:
+            idx = parts.index("src")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        if len(parts) > 1:
+            return parts[0]
+        return ""
+
     # ═══════════════════════════════════════════════════════════════
     # Helpers
     # ═══════════════════════════════════════════════════════════════
 
     def _run_layer1_checks(self, state: RunState) -> tuple[list[str], list[str], object]:
-        """运行 Layer1 检查 —— 使用默认规则集（SecretScan / TestIntegrity / ScopeBoundary / SkipDetection）。
+        """运行 Layer1 检查 —— 7 条 Python 确定性规则。
 
-        Returns: (violations, warnings, review_result)
+        Returns: (violations, warnings, results_list)
         """
         violations: list[str] = []
         warnings: list[str] = []
-        layer1_result = None
+        results: list = []
         try:
             from engines.review.engine import ReviewEngine
 
             review = ReviewEngine()
-            layer1_result = review.check(state)
-            individual_results = layer1_result.details.get("results", [])
-            passed_count = sum(1 for r in individual_results if r.get("passed", True))
+            results = review.run_layer1(state)
+            blocked = [r for r in results if r.block]
+            warn_items = [r for r in results if not r.passed and not r.block]
+            passed = sum(1 for r in results if r.passed)
             state.task_state.notes.append(
-                f"[REVIEW] Layer1: {passed_count}/{len(individual_results)} passed, blocked={layer1_result.block}"
+                f"[REVIEW] Layer1: {passed}/{len(results)} passed, "
+                f"{len(blocked)} blocked, {len(warn_items)} warned"
             )
-            if layer1_result.block:
-                violations.append(f"Review blocked: {layer1_result.reason}")
-            for r in individual_results:
-                if r.get("severity") == "warn":
-                    warnings.append(f"Review warn [{r.get('rule', '?')}]: {r.get('reason', '')}")
+            for r in blocked:
+                violations.append(f"[{r.rule_name}] BLOCK: {r.reason}")
+            for r in warn_items:
+                warnings.append(f"[{r.rule_name}] WARN: {r.reason}")
         except Exception as exc:
             logger.warning("Review Layer1 check failed: %s", exc)
             state.task_state.notes.append(f"[REVIEW] Layer1 跳过: {exc}")
-        return violations, warnings, layer1_result
+        return violations, warnings, results
 
     def _get_git_diff(self, state: RunState) -> str:
         """获取 git diff 文本供 AI 审查使用。"""
@@ -2277,89 +3239,80 @@ class ReviewHandler(StageHandler):
 
 
 class MemoryHandler(StageHandler):
-    """记忆处理器 —— 三层存储：session → index + entries → projection。
+    """记忆处理器 —— 触发 /memory skill，AI 直接写入 loop-memory-*.md。
 
-    Python 职责:
-        MemoryExtractor 提取候选 → MemoryStore 写入 entries/ + 更新索引
-        → MemoryProjection 同步到 projections/
-    AI 职责:
-        判断哪些值得沉淀
+    loop-memory 通过 .claude/rules/ 自动加载，无需 Python 投影。
+    写入后人工 git diff 审核。
     """
 
     stage = StageType.MEMORY
 
     def handle(self, state: RunState) -> RunState:
-        logger.info("Memory — extracting learnings and syncing projections")
-
+        """Gate 检查 → /memory skill → 文件验证 → 流转。"""
+        logger.info("Memory — checking gate then triggering /memory skill")
         state.task_state.stage = StageType.MEMORY
 
-        try:
-            from engines.memory.extractor import MemoryExtractor
-            from engines.memory.store import MemoryStore
-            from engines.memory.projection import MemoryProjection
+        from engines.runtime.completion_gate import _check_memory
+        gate = _check_memory(state)
 
-            store = MemoryStore(project_root=state.project_root)
+        if not gate.passed:
+            # 提取本轮关键事件供 /memory 分析
+            memory_context = self._build_memory_context(state)
+            state.needs_ai_input = True
+            state.pending_action = "memory"
+            state.pending_prompt = {
+                "instruction": (
+                    "请运行 /memory skill，从本轮开发中提取可复用经验。\n\n"
+                    f"Gate 状态: {gate.message}\n\n"
+                    f"本轮关键事件（供参考）：\n{memory_context}\n\n"
+                    "返回格式: {\"files\": [\".claude/rules/loop-memory-xxx.md\", ...]} "
+                    "或 {\"skipped\": true, \"reason\": \"无值得沉淀的经验\"}"
+                ),
+            }
+            state.task_state.notes.append(f"[MEMORY] Gate: {gate.message}，等待 AI")
+            return state
 
-            # 0. 迁移旧格式（如果需要）
-            store.migrate_if_needed()
+        state.task_state.notes.append("[MEMORY] 记忆沉淀完成 → COMPLETED")
+        return self._complete(state, "记忆沉淀完成")
 
-            store.load_index()
+    @staticmethod
+    def _build_memory_context(state: RunState) -> str:
+        """从 RunState 提取本轮关键事件摘要，供 /memory skill 分析。"""
+        parts: list[str] = []
 
-            # 1. 提取候选 memory
-            extractor = MemoryExtractor()
-            candidates = extractor.extract(state)
-            state.task_state.notes.append(
-                f"[MEMORY] 提取 {len(candidates)} 条候选 memory"
-            )
+        # 失败记录
+        if state.failures:
+            parts.append(f"失败记录 ({len(state.failures)} 条):")
+            for f in state.failures[-5:]:
+                parts.append(f"  - [{f.category.value}] {f.stage.value}: {f.message[:120]}")
 
-            # 2. 保存 session 原料 → .ai/memory/sessions/
-            session = extractor.build_session_memory(state)
-            store.save_session(session.model_dump() if hasattr(session, 'model_dump') else session)
+        # 修复记录
+        repair_log = state.metadata.get("repair_result")
+        if repair_log and isinstance(repair_log, dict):
+            parts.append(f"修复: {repair_log.get('summary', repair_log.get('root_cause', ''))[:200]}")
 
-            # 3. 写入 entries/ + 更新 memory.md 索引
-            added = 0
-            for entry in candidates:
-                if store.add(entry):
-                    added += 1
+        # 审查发现
+        review = state.metadata.get("review_report") or {}
+        if review.get("layer1_violations"):
+            parts.append(f"审查 violations: {review['layer1_violations'][:3]}")
+        if review.get("layer1_warnings"):
+            parts.append(f"审查 warnings: {review['layer1_warnings'][:3]}")
 
-            if added > 0:
-                all_tags: list[str] = []
-                for entry in candidates:
-                    all_tags.extend(entry.tags)
-                promoted = store.promote_by_tags(list(set(all_tags)), min_matches=2)
-                if promoted:
-                    state.task_state.notes.append(
-                        f"[MEMORY] 自动升级 {promoted} 条 DRAFT→CONFIRMED"
-                    )
-                state.task_state.notes.append(
-                    f"[MEMORY] 写入 {added} 条新 memory → .ai/memory/entries/ + 索引更新"
-                )
-                logger.info("Memory: %d new entries written", added)
+        # 验证结果
+        v = state.verification
+        if v.status and v.status.value != "pending":
+            parts.append(f"验证: {v.status.value} - {v.summary[:200] if v.summary else ''}")
 
-            # 4. 定期治理: 淘汰过期 draft、检查压缩
-            stale_count = store.evict_stale_drafts()
-            if stale_count:
-                state.task_state.notes.append(
-                    f"[MEMORY] 淘汰 {stale_count} 条过期 draft → archive/stale/"
-                )
-            compress_groups = store.compress_duplicates()
-            if compress_groups:
-                state.task_state.notes.append(
-                    f"[MEMORY] 发现 {compress_groups} 组可压缩的同类记忆"
-                )
+        # 变更摘要
+        task_logs = state.task_state.task_logs
+        if task_logs:
+            files = []
+            for tl in task_logs:
+                files.extend(tl.changed_files)
+            if files:
+                parts.append(f"变更文件: {', '.join(files[:10])}")
 
-            # 5. 同步投影 → .ai/memory/projections/ + CLAUDE.md 等
-            projection = MemoryProjection(store)
-            updated = projection.sync("claude")
-            state.task_state.notes.append(
-                f"[MEMORY] 已同步投影: {len(updated)} 文件"
-            )
-
-        except Exception as exc:
-            logger.warning("Memory handler failed: %s", exc)
-            state.task_state.notes.append(f"[MEMORY] Memory 系统错误: {exc}")
-
-        return self._complete(state, f"记忆沉淀完成")
+        return "\n".join(parts) if parts else "（本轮无特殊事件）"
 
 
 class DirectExecuteHandler(StageHandler):
@@ -2371,7 +3324,29 @@ class DirectExecuteHandler(StageHandler):
     stage = StageType.DIRECT_EXECUTE
 
     def handle(self, state: RunState) -> RunState:
+        """处理 DIRECT_EXECUTE 阶段：Direct Mode 快速执行。
+
+        Args:
+            state: 当前运行状态
+
+        Returns:
+            RunState: 更新后的运行状态
+        """
         logger.info("Direct Execute — fast path, skipping spec/plan")
+
+        # 0. 场景检查：direct 跳过了 TEST_DESIGN，首次进入时让 AI 生成场景
+        if not state.metadata.get("scenarios_generated"):
+            state.metadata["scenarios_generated"] = True
+            state.needs_ai_input = True
+            state.pending_action = "generate_scenarios"
+            state.pending_prompt = {
+                "instruction": (
+                    "请调用 /aicode-test-design 为此改动生成 1~2 个最小场景 YAML，"
+                    "然后 loop continue。"
+                ),
+            }
+            state.task_state.notes.append("[DIRECT] 首次进入，等待 AI 生成场景")
+            return state
 
         intake = state.task_intake
 
@@ -2399,12 +3374,13 @@ class DirectExecuteHandler(StageHandler):
             from engines.review.engine import ReviewEngine
 
             review = ReviewEngine()
-            result = review.check(state)
-            if result.block:
-                return self._stop_failure(state, f"Direct mode review blocked: {result.reason}")
-            individual_results = result.details.get("results", [])
-            passed = sum(1 for r in individual_results if r.get("passed", True))
-            state.task_state.notes.append(f"[DIRECT] Review: {passed}/{len(individual_results)} passed")
+            results = review.run_layer1(state)
+            blocked = [r for r in results if r.block]
+            if blocked:
+                reasons = "; ".join(r.reason for r in blocked)
+                return self._stop_failure(state, f"Direct mode review blocked: {reasons}")
+            passed = sum(1 for r in results if r.passed)
+            state.task_state.notes.append(f"[DIRECT] Review: {passed}/{len(results)} passed")
         except Exception as exc:
             logger.warning("Review check skipped in direct mode: %s", exc)
 
@@ -2463,29 +3439,8 @@ class DirectExecuteHandler(StageHandler):
         return state
 
     def _load_direct_context(self, state: RunState) -> str:
-        """Direct Mode 上下文 — 浅层上下文注入（至少 codegraph 定位）。
-
-        比 EXECUTE 策略更轻量，仅加载项目地图 + codegraph 相关上下文。
-        复用 ContextRouter 实例避免重复初始化。
-        """
-        try:
-            from engines.context.router import ContextRouter
-            # 复用缓存实例
-            if not hasattr(self, '_cached_router') or self._cached_router is None:
-                self._cached_router = ContextRouter(state.project_root)
-            router = self._cached_router
-            # 使用 DIRECT_EXECUTE 的轻量策略
-            bundle = router.route(stage=StageType.DIRECT_EXECUTE, run_state=state)
-            if bundle and bundle.pieces:
-                state.task_state.notes.append(
-                    f"[DIRECT context] tokens={bundle.total_tokens}, "
-                    f"files={len(bundle.pieces)}"
-                )
-                return bundle.render()
-            return ""
-        except Exception as exc:
-            logger.warning("ContextRouter failed for DIRECT_EXECUTE: %s", exc)
-            return ""
+        """AI 自行使用 Read / CodeGraph MCP 获取上下文，Python 不注入。"""
+        return ""
 
     def _validate_direct_result(
         self, state: RunState, submitted: dict, intake,
@@ -2528,6 +3483,38 @@ class DirectExecuteHandler(StageHandler):
         return self._complete(state, f"Direct Mode: 完成 {len(changed_files)} 个文件")
 
 
+# ── Adapter 端口映射（动态，避免硬编码）────────────────────────
+
+def _build_adapter_port_map(project_root: Path) -> dict[str, int]:
+    """扫描内置 + 项目级 Adapter 类，构建 {adapter_type: default_port} 映射。
+
+    Args:
+        project_root: 项目根目录（用于发现 .ai/adapters/）
+
+    Returns:
+        {adapter_type: default_port} 字典
+    """
+    result: dict[str, int] = {}
+    try:
+        from engines.scenario.adapters.base import ResourceAdapter
+        from engines.scenario.adapters import _BUILTIN_ADAPTERS
+
+        # 内置适配器
+        for cls in _BUILTIN_ADAPTERS.values():
+            if cls.adapter_type and cls.default_port:
+                result[cls.adapter_type] = cls.default_port
+
+        # 项目级适配器 (.ai/adapters/*.py)
+        from engines.scenario.adapters import DataSourceRegistry
+        DataSourceRegistry._discover_project_adapters(project_root)
+        for cls in DataSourceRegistry._PROJECT_ADAPTERS.values():
+            if cls.adapter_type and cls.default_port:
+                result[cls.adapter_type] = cls.default_port
+    except Exception:
+        pass
+    return result
+
+
 # ── 默认 Handler 注册表 ──────────────────────────────────────────
 
 def default_handlers() -> dict[StageType, StageHandler]:
@@ -2536,6 +3523,9 @@ def default_handlers() -> dict[StageType, StageHandler]:
     每个 handler 实现 Python 引擎的确定性工作（context/guard/scenario/memory），
     创造性工作（spec/plan/code/root-cause）由 AI 完成。
     应用项目可通过注入自定义 handler 覆盖默认实现。
+
+    Returns:
+        dict[StageType, StageHandler]: 阶段类型到处理器的映射字典
     """
     return {
         StageType.INTAKE:         IntakeHandler(),

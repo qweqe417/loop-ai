@@ -1,7 +1,7 @@
 @echo off
-REM AI Coding Loop - Windows 引擎入口
-REM 用法: engines\run.bat <command> [args...]
-REM AI 通过调用此脚本与 Python 引擎通信
+REM AI Coding Loop - Windows engine entry point
+REM Usage: engines\run.bat <command> [args...]
 
+set PYTHONIOENCODING=utf-8
 cd /d "%~dp0\.."
 python engines\cli.py %*

@@ -1,67 +1,92 @@
-"""Scenario 验证模块 —— 真实流程验证。
+"""场景验证引擎模块。
 
-提供场景定义、执行引擎、断言引擎和环境健康检查：
-- Scenario / ScenarioStep / Assertion / Fixture: 声明式场景定义
-- ScenarioRunner: 加载场景 → Sanity Check → 执行步骤 → 执行断言 → 输出报告
-- AssertionEngine: 对 HTTP / DB / Redis / MQ / 日志 断言进行判断
-- SanityChecker: 环境健康检查（端口 / HTTP / MySQL / Redis / MQ）
-
-与 Loop 集成：
-    VerifyHandler 调用 ScenarioRunner.run_all()，
-    结果写入 RunState.scenario_results 和 RunState.verification。
+提供自动化场景测试能力：加载 Scenario YAML 定义，执行步骤，
+断言验证，生成测试报告。
 """
 
+# 从 models 模块导入 Scenario 相关数据模型和枚举
 from .models import (
     Assertion,
     AssertionOperator,
     AssertionType,
+    AuthConfig,
+    CleanupConfig,
+    DeviceType,
+    DomAssertion,
     Fixture,
+    FixtureEntry,
+    GivenConfig,
     SanityCheckItem,
-    SanityCheckResult,
-    SanityReport,
     Scenario,
+    ScenarioScope,
     ScenarioStep,
 )
+# 从 runner 模块导入场景执行引擎和结果类
+from .runner import ScenarioReport, ScenarioResult, ScenarioRunner
+# 从 assertion 模块导入断言引擎和报告类
 from .assertion import AssertionEngine, AssertionReport, AssertionResult
+# 从 sanity 模块导入健康检查器和报告类
+from .sanity import SanityChecker, SanityCheckResult, SanityReport
+# 从 resources 模块导入资源适配器及其工厂函数
 from .resources import (
-    DatabaseAdapter,
     HttpAdapter,
-    LogAdapter,
-    MessageQueueAdapter,
-    RedisAdapter,
     ResourceAdapter,
     default_adapters,
 )
-from .sanity import SanityChecker
-from .runner import ScenarioReport, ScenarioResult, ScenarioRunner
+# 从 failure_classifier 模块导入失败分类器
+from .failure_classifier import FailureCategory, classify_failure, classify_assertion_failures
+# 从 report_generator 模块导入测试报告生成器
+from .report_generator import ReportGenerator
+# 从 service_manager 模块导入服务管理器
+from .service_manager import ServiceConfig, ServiceManager
+# 从 auth_provider 模块导入鉴权提供者
+from .auth_provider import AuthProvider
+# 从 playwright_executor 模块导入前端执行器
+from .playwright_executor import PlaywrightExecutor
+# 从 safe_eval 模块导入安全表达式求值函数
+from .safe_eval import safe_eval, safe_exec
 
+# 模块公开接口列表
 __all__ = [
-    # 场景模型
+    # 数据模型
     "Scenario",
     "ScenarioStep",
     "Assertion",
     "AssertionType",
     "AssertionOperator",
     "Fixture",
-    # 环境检查
     "SanityCheckItem",
+    # 增强模型
+    "ScenarioScope",
+    "DeviceType",
+    "AuthConfig",
+    "FixtureEntry",
+    "GivenConfig",
+    "CleanupConfig",
+    "DomAssertion",
+    # 引擎
+    "ScenarioRunner",
+    "ScenarioResult",
+    "ScenarioReport",
+    "AssertionEngine",
+    "AssertionResult",
+    "AssertionReport",
+    "SanityChecker",
     "SanityCheckResult",
     "SanityReport",
-    "SanityChecker",
-    # 断言引擎
-    "AssertionEngine",
-    "AssertionReport",
-    "AssertionResult",
-    # 执行引擎
-    "ScenarioRunner",
-    "ScenarioReport",
-    "ScenarioResult",
+    "FailureCategory",
+    "classify_failure",
+    "classify_assertion_failures",
+    "ReportGenerator",
+    "ServiceManager",
+    "ServiceConfig",
+    "AuthProvider",
+    "PlaywrightExecutor",
     # 资源适配器
     "ResourceAdapter",
     "HttpAdapter",
-    "DatabaseAdapter",
-    "RedisAdapter",
-    "MessageQueueAdapter",
-    "LogAdapter",
     "default_adapters",
+    # 安全求值
+    "safe_eval",
+    "safe_exec",
 ]

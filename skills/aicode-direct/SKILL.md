@@ -1,70 +1,84 @@
 ---
 name: aicode-direct
 user-invocable: true
-description: "Fast track for small changes — skip Spec/Plan, code directly with Guard checks"
+description: "Fast track for small changes and bug fixes — 状态机全程驱动 TDD → Review → Gate → Verify → Memory"
 ---
 
 # /aicode-direct — Direct Mode
 
-Fast path for low-complexity, low-risk changes. Skips Spec and Plan generation — goes straight to coding.
-
-## Trigger
+轻量通道。小改动、小 bug 修复。**状态机一次性启动，整个流程不打断。**
 
 ```
-/aicode-direct <小改动描述>
-/aicode-direct --task "给 User 模型加一个 nickname 字段"
-/aicode-direct --only --task "小改动"       (仅生成代码，不验证/审查)
+/aicode-direct <小改动或bug>
+/aicode-direct --no-verify "改个日志级别"        # 跳过场景验证
 ```
 
-## Execution
+- 默认：TDD → Review → Gate → Verify → Repair → Memory，全自动
+- `--no-verify`：跳过 Verify，到 Memory 结束
 
-### Step 1: Start direct mode
+## direct vs dev — 一句话
+
+| `/aicode-direct` | `/aicode-dev` |
+|------------------|---------------|
+| Bug 修复、小改动，你清楚要改什么 | 需求复杂，需要 AI 先帮你理清思路再写 |
+
+**不做预判。** 如果你选错了，状态机会在 REVIEW/VERIFY 阶段发现问题，该修的修，修不了的升级给你。流程本身兜底，不用靠前置检查挡人。
+
+## Execution — 状态机全程驱动
+
+启动一次，循环响应 `pending_action`，直到 `final_stage: "completed"`。
+
+### Pre-flight：检查场景覆盖
+
+启动状态机前，**先检查有没有覆盖此改动的场景**：
+
+1. 扫一眼 `.ai/scenarios/` 下有没有匹配此功能的 YAML（含子目录）
+2. **没有 → 立即调用 `/aicode-test-design`**，为当前改动生成 1~2 个最小场景 YAML
+3. 有（或生成完成）→ 启动状态机
+
+### 首次启动
 
 ```bash
-# 完整模式 (生成+验证+审查)
-{engines_cmd} loop direct --task "<任务>" --format json
-
-# 仅生成代码
-{engines_cmd} loop direct --only --task "<任务>" --format json
+{engines_cmd} loop direct --state-file .ai/run.json --task "<用户任务描述>"
 ```
 
-### Step 2: The direct flow
+### 交互循环
 
-完整模式:
 ```
-DIRECT_EXECUTE → VERIFY → REPAIR (失败时) → REVIEW → COMPLETED
+┌──────────────────────────────────────────┐
+│  1. 读命令输出的 JSON                      │
+│  2. needs_ai_input: true → 看 pending_action │
+│     完成对应任务 → loop continue             │
+│  3. final_stage: "completed" → 结束         │
+└──────────────────────────────────────────┘
 ```
 
---only 模式:
+**循环内绝对禁止：** 汇报进度、展示 diff、追问用户、输出无关内容。唯一合法行为：读 JSON → 做 pending_action → loop continue。
+
+### pending_action 对照表
+
+| pending_action | AI 做什么 | 结果 JSON |
+|---|---|---|
+| `direct_execute` | TDD 写代码（先写测试→失败→最小实现→通过） | `{"changed_files": [...], "summary": "...", "lines_added": N, "lines_removed": N}` |
+| `review` | 调用 `/aicode-review` 执行 6 维深度审查 | `{"passed": true/false, "violations": [...], "critical_count": N, "important_count": N, "minor_count": N, "summary": "..."}` |
+| `review_fix` | 修复审查违规 | `{"fixed": true/false, "changes": [{"file": "...", "description": "..."}], "summary": "..."}` |
+| `repair` | 分析失败根因，最小修复 | `{"changed_files": [...], "summary": "...", "root_cause": "..."}` |
+| `memory` | 调用 `/memory` 沉淀经验 | `{"files": [".claude/rules/loop-memory-xxx.md", ...]}` 或 `{"skipped": true, "reason": "无值得沉淀的经验"}` |
+
+### 状态机流转
+
 ```
-DIRECT_EXECUTE → COMPLETED
+DIRECT_EXECUTE → REVIEW → VERIFY ⇄ REPAIR → MEMORY → COMPLETED
+     ↑              ↑        ↑       ↑         ↑
+  AI做TDD       AI审查   0 token   AI修复   AI记忆
 ```
 
-### Step 3: Read results
-
-Parse JSON:
-- `task_intake.flow_mode` — should be "direct"
-- `task_intake.risk_level` — L1 or L2 only
-- `verification_required` — true/false
-
-### Step 4: When to use
-
-Suitable for:
-- Adding a field to a model
-- Fixing a simple bug
-- Updating configuration
-- Small refactoring within one file
-
-NOT suitable for:
-- New API endpoints
-- Database schema changes
-- Multi-file architectural changes
-- Risk level L3+
+- REVIEW 不通过 → review_fix → 重审（最多3轮）
+- VERIFY 失败 → 自动分类，REAL_BUG 进 REPAIR（最多3轮）
+- --no-verify → 跳过 VERIFY，直接 MEMORY
 
 ## Guardrails
 
-- Only for L1-L2 risk level changes
-- Must respect project code style
-- Guard checks still run on review
-- If change grows beyond 3 files → stop, suggest `/aicode-full`
-- Present results in Chinese
+- 改动超过 3 个文件 → 停止，建议用 `/aicode-dev`
+- 涉及 DB schema / 权限 → 停止，建议用 `/aicode-dev`
+- 结果用中文呈现
