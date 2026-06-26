@@ -215,6 +215,37 @@ Feature 名 = Spec 文件名去掉 `.md`。比如 `docs/spec/order-management.md
 mkdir -p .ai/scenarios/<feature>
 ```
 
+#### ①.5 查表结构（有 mysql fixture 时必做，禁止跳过）
+
+**任何包含 `type: mysql` + `action: insert/update` 的 fixture，写 data 之前必须先用 CLI 查表结构：**
+
+```bash
+{engines_cmd} data query --source main_db --target "SHOW COLUMNS FROM <table>"
+```
+
+输出每一列的 `Field / Type / Null / Key / Default / Extra`。
+
+**根据结果确定 fixture data 必须包含的字段：**
+1. `Null = NO` 且 `Default IS NULL` 且非 `auto_increment` → **必须出现在 data 中**
+2. `Null = NO` 且有默认值 → 可选，但建议写出以明确意图
+3. `Null = YES` → 可选
+4. 只写实际存在的列名，**禁止猜列名**
+
+**示例：**
+
+```bash
+# 查询 sys_tenant 表结构
+{engines_cmd} data query --source main_db --target "SHOW COLUMNS FROM sys_tenant"
+```
+
+```json
+// 返回结果中逐列检查：
+// Field: password_hash, Null: NO, Default: null  → 必须写
+// Field: created_at,    Null: NO, Default: CURRENT_TIMESTAMP → 有默认，可选
+```
+
+**如果项目多数据库源：** 优先用 `main_db`，如 fixture 涉及其他库则查对应 source。
+
 #### ② 再写文件
 
 每个 Scenario Write 到 `.ai/scenarios/<feature>/<scenario-id>.yaml`。路径必须包含 `<feature>/` 子目录。
@@ -417,6 +448,7 @@ AI: 测试设计完成。
 
 ### 内容规则
 - **文件路径: `.ai/scenarios/<feature>/<id>.yaml`** — 不直接放根目录
+- **写 mysql fixture 前必须先查表结构** — `{engines_cmd} data query --source main_db --target "SHOW COLUMNS FROM <table>"`，禁止猜列名、禁止遗漏 NOT NULL 无默认值列
 - **不编造业务规则** — 不确定的写入 open_questions
 - **接口路径来自 Plan** — 无 Plan 时标注 `inferred_source: ai`
 - **涉及数据变化必须有 db_query/db_count 断言**（backend/fullstack）

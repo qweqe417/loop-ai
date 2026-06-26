@@ -582,8 +582,30 @@ class PlanHandler(StageHandler):
             state.task_state.notes.append(f"[PLAN] Gate 未通过 (第{retries+1}次): {gate.message}")
             return state
 
-        logger.info("PlanHandler: gate passed, advancing to TEST_DESIGN")
-        state.task_state.notes.append("[PLAN] Plan 校验通过 → TEST_DESIGN")
+        # Gate 通过 = Plan 文件存在，但还需检查 contracts 是否已提取
+        if not state.plan_contracts:
+            retries = state.metadata.get("plan_contract_retries", 0)
+            if retries >= self.MAX_RETRIES:
+                logger.error("PlanHandler: contract extraction failed %d times, aborting", retries)
+                state.task_state.notes.append(f"[PLAN] Contract 提取失败 {retries} 次，中止")
+                return self._stop_failure(state, f"Plan Contract 提取失败 {retries} 次: 请检查 Plan 文件内容是否包含可执行任务")
+            state.metadata["plan_contract_retries"] = retries + 1
+            plan_file = state.metadata.get("plan_file", "")
+            logger.info("PlanHandler: gate passed but plan_contracts empty, asking AI to extract contracts (retry %d/%d)", retries + 1, self.MAX_RETRIES)
+            state.needs_ai_input = True
+            state.pending_action = "generate_plan"
+            state.pending_prompt = {
+                "instruction": (
+                    f"请运行 /aicode-plan --from {plan_file}，从 Plan 文件提取 Task Contracts。\n"
+                    f"Plan 文件 gate 已通过，但 plan_contracts 为空 (第{retries+1}次提取)。\n"
+                    f"返回格式: {{\"contracts\": [{{\"task_id\": \"...\", \"goal\": \"...\", \"allowed_files\": [...], \"budget\": {{...}}}}, ...]}}"
+                ),
+            }
+            state.task_state.notes.append(f"[PLAN] Gate 通过但 plan_contracts 为空，等待 AI 提取 Contracts (第{retries+1}次)")
+            return state
+
+        logger.info("PlanHandler: gate passed + contracts ready (%d tasks), advancing to TEST_DESIGN", len(state.plan_contracts))
+        state.task_state.notes.append(f"[PLAN] Plan 校验通过 ({len(state.plan_contracts)} Contracts) → TEST_DESIGN")
         return self._complete(state, "Plan 校验通过")
 
 
@@ -627,13 +649,21 @@ class ExecuteHandler(StageHandler):
         # 初始化 per-task 循环
         contracts = state.plan_contracts
         if not contracts:
-            # 无 Plan Contracts，无法执行
-            state.task_state.notes.append(
-                "[EXECUTE] ⚠️ 无 Plan Contracts — 无法执行。"
-                "请先运行 'loop plan' 或 'loop plan-only' 生成 Plan，"
-                "或通过 --state-file 传入含 Plan 的状态文件"
-            )
-            return self._complete(state, "无 Plan Contracts — 需要先生成 Plan")
+            # 无 Plan Contracts，无法执行 — 停止并告知用户
+            plan_file = state.metadata.get("plan_file", "")
+            if plan_file:
+                msg = (
+                    f"[EXECUTE] ❌ Plan 文件已指定 ({plan_file}) 但 plan_contracts 为空。"
+                    f"请运行 /aicode-plan --from {plan_file} 提取 Contracts。"
+                )
+            else:
+                msg = (
+                    "[EXECUTE] ❌ 无 Plan Contracts 且未指定 --plan-file。"
+                    "请通过 --plan-file <路径> 指定 Plan 文件。"
+                )
+            state.task_state.notes.append(msg)
+            logger.error(msg)
+            return self._stop_failure(state, msg)
 
         current_idx = state.task_state.current_task_index
         if current_idx >= len(contracts):
@@ -645,17 +675,15 @@ class ExecuteHandler(StageHandler):
         # ── Phase VALIDATE: AI 已提交当前 Task 结果 ──
         submitted = state.metadata.get("execute_result")
         if submitted and isinstance(submitted, dict):
-            # 确认回复处理: AI 提交了 checklist 确认 → 切换为编码阶段
+            # 确认回复处理: AI 提交了 checklist 确认 → 直接进入编码阶段
             if submitted.get("confirmed"):
                 state.metadata.pop("execute_result", None)
-                state.metadata["execute_checklist_confirmed"] = True
                 confirmed_notes = submitted.get("notes", "")
                 state.task_state.notes.append(
                     f"[EXECUTE] ✅ Checklist 已确认: {confirmed_notes[:100]}"
                 )
-                state.needs_ai_input = False
                 logger.info("Checklist confirmed, advancing to full task prompt")
-                return state  # 下一轮 _prepare_full_task 构造编码 prompt
+                return self._prepare_full_task(state, contracts[current_idx], current_idx, len(contracts))
 
             # PlanLock 恢复路径: AI 提交 lock_plan 指令
             if submitted.get("lock_plan"):
@@ -702,6 +730,10 @@ class ExecuteHandler(StageHandler):
         task_summary = contract.get("goal", contract.get("title", ""))
         # 构建实现检查清单
         checklist = self._build_checklist(contract)
+
+        # 构建下游影响字符串
+        requires = contract.get("requires", [])
+        requires_str = ", ".join(requires) if requires else "无"
 
         # 加载编码前反模式警告
         preflight = self._load_preflight_warnings(state)
@@ -1178,29 +1210,24 @@ class ExecuteHandler(StageHandler):
 
 
     def _pre_guard_check(self, state: RunState) -> bool:
-        """审查前置检查 —— 在 AI 编码前运行默认规则集。"""
+        """审查前置检查 —— 在 AI 编码前运行默认规则集。
+
+        预飞检查不阻断流程，只记录警告。硬阻断规则在 REVIEW 阶段执行。
+        """
         try:
             from engines.review import create_review_engine
 
             review = create_review_engine()
-            result = review.check(state)
-            if result.block:
-                state.task_state.notes.append(f"[EXECUTE] Review 拦截: {result.reason}")
-                state.decision = None
-                return False
-
-            individual_results = result.details.get("results", [])
-            passed = sum(1 for r in individual_results if getattr(r, 'passed', True))
-            state.task_state.notes.append(
-                f"[EXECUTE] Review: {passed}/{len(individual_results)} passed"
-            )
-            return True
+            results = review.run_layer1(state)
+            blocked = [r for r in results if r.block]
+            if blocked:
+                state.task_state.notes.append(
+                    f"[EXECUTE] Review 预飞警告: {[r.rule_name for r in blocked]}"
+                )
+            return True  # 预飞检查不阻断执行
         except Exception as exc:
-            logger.error("Guard check raised exception, BLOCKING: %s", exc)
-            state.task_state.notes.append(
-                f"[EXECUTE] Review 异常，阻止执行: {type(exc).__name__}: {exc}"
-            )
-            return False
+            logger.warning("Guard check exception (non-blocking): %s", exc)
+            return True  # 异常也不阻断，放行编码
 
     def _load_execute_context(self, state: RunState, contract: dict) -> str:
         """AI 自行使用 Read / CodeGraph MCP 获取上下文，Python 不注入。"""
@@ -2442,7 +2469,7 @@ class RepairHandler(StageHandler):
         }
         state.needs_ai_input = True
         state.task_state.notes.append(
-            f"[REPAIR] PREPARE: attempt={state.task_state.retry_count}/{self.MAX_REPAIR_RETRIES}"
+            f"[REPAIR] PREPARE: attempt={state.task_state.retry_count}/{self._get_max_retries(state)}"
         )
         logger.info("Repair prompt ready, waiting for AI fix")
         return state

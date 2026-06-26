@@ -161,3 +161,43 @@ def _sanity_checks(scenario: Scenario, errors: list[str], warnings: list[str]) -
                 f"[{scenario.id}] 断言 '{a.type.value}' 不支持 operator '{a.operator.value}'，"
                 f"支持的: {sorted(allowed)}"
             )
+
+    # 9. mysql insert/update fixture 数据完整性检查
+    _check_fixture_completeness(scenario, warnings)
+
+
+# ── 常见 DB 表必须有这些列的启发式规则 ──
+_REQUIRED_COLUMN_HINTS: dict[str, list[str]] = {
+    # 通用审计列（大部分业务表都有）
+    "*": ["id"],  # 主键 —— 如果 fixture data 里没 id 且表无 AUTO_INCREMENT，插入会失败
+}
+
+# 已知的表 → 已知必需列（无 DEFAULT 的 NOT NULL 列）
+_KNOWN_TABLE_REQUIRED_COLS: dict[str, list[str]] = {}
+
+_FIXTURE_MIN_FIELDS = 3  # insert fixture 少于这个字段数 → 警告
+
+
+def _check_fixture_completeness(scenario: Scenario, warnings: list[str]) -> None:
+    """检查 mysql insert/update fixture 的数据完整性。
+
+    核心思路：fixture data 字段过少（< 3）时发出警告，提示 AI 可能没查表结构。
+    这不是精确校验（需要 DB 连接），而是启发式保护。
+    """
+    for f in scenario.fixtures:
+        if f.type != "mysql" or f.action not in ("insert", "update"):
+            continue
+        data = f.data
+        if isinstance(data, list):
+            for i, row in enumerate(data):
+                if isinstance(row, dict) and len(row) < _FIXTURE_MIN_FIELDS:
+                    warnings.append(
+                        f"[{scenario.id}] fixture '{f.name}'[{i}] 只有 {len(row)} 个字段（< {_FIXTURE_MIN_FIELDS}），"
+                        f"可能遗漏了 NOT NULL 列。请用 data query --source main_db --target \"SHOW COLUMNS FROM {f.target}\" 确认表结构后补全"
+                    )
+        elif isinstance(data, dict):
+            if len(data) < _FIXTURE_MIN_FIELDS:
+                warnings.append(
+                    f"[{scenario.id}] fixture '{f.name}' 只有 {len(data)} 个字段（< {_FIXTURE_MIN_FIELDS}），"
+                    f"可能遗漏了 NOT NULL 列。请用 data query --source main_db --target \"SHOW COLUMNS FROM {f.target}\" 确认表结构后补全"
+                )

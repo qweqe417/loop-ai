@@ -164,6 +164,10 @@ def main() -> int:
     p_loop.add_argument("--target", default="", help="目标 AI 工具 (claude_code/codex/cursor)，默认自动检测")
     p_loop.add_argument("--scenario-dir", default="",
                         help="仅加载 .ai/scenarios/<dir> 下的场景（相对于 .ai/scenarios/）")
+    p_loop.add_argument("--plan-file", default="",
+                        help="指定 Plan 文件路径（相对于项目根目录），如 docs/plan/abc.md")
+    p_loop.add_argument("--spec-file", default="",
+                        help="指定 Spec 文件路径（相对于项目根目录），如 docs/spec/abc.md")
     p_loop.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
 
     # ── verify ───────────────────────────────────
@@ -422,6 +426,8 @@ def _cmd_loop(args: argparse.Namespace) -> dict:
             "user_input": args.task,
             "args_task": args.task,
             "scenario_dir": getattr(args, "scenario_dir", "") or "",
+            "plan_file": getattr(args, "plan_file", "") or "",
+            "spec_file": getattr(args, "spec_file", "") or "",
         },
     )
 
@@ -499,6 +505,14 @@ def _cmd_loop_continue(args: argparse.Namespace) -> dict:
             state.metadata["spec_result"] = result_data
         elif action == "generate_plan":
             state.metadata["plan_result"] = result_data
+            # 从 plan_result 提取 contracts 写入 plan_contracts，供 EXECUTE 使用
+            contracts = result_data.get("contracts", [])
+            if contracts:
+                state.plan_contracts = contracts
+                state.metadata["plan_contract_retries"] = 0  # 重置重试计数
+                logger.info("Plan contracts extracted: %d tasks", len(contracts))
+            else:
+                logger.warning("plan_result 中无 contracts 字段，plan_contracts 仍为空")
         elif action == "generate_scenarios":
             state.metadata["scenarios_result"] = result_data
         elif action in ("execute_task", "confirm_checklist", "lock_plan",

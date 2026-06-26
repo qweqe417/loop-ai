@@ -85,21 +85,8 @@ def _check_plan(state: "RunState") -> GateResult:
             return GateResult.ok()
         return GateResult.fail(f"指定的 Plan 文件不存在或过小: {plan_file}")
 
-    # 兜底：扫描目录
-    for dir_name in ("plan", "superpowers/plans"):
-        dir_path = root / "docs" / dir_name
-        if dir_path.is_dir():
-            for f in dir_path.glob("*.md"):
-                if f.stat().st_size > 200:
-                    return GateResult.ok()
-    return GateResult.fail("PLAN 未完成：无有效 .md 文件")
-
-    for f in md_files:
-        content = f.read_text(encoding="utf-8")
-        if "allowed_files" in content.lower() and f.stat().st_size > 200:
-            return GateResult.ok()
-
-    return GateResult.fail("PLAN 完成但文件中未找到 allowed_files 或文件是空壳")
+    # 未指定 plan 文件 → 报错，要求用户通过 --plan-file 指定
+    return GateResult.fail("PLAN: 未指定 plan 文件，请通过 --plan-file 参数指定（如 --plan-file docs/plan/abc.md）")
 
 
 # ── TEST_DESIGN ──
