@@ -214,6 +214,7 @@ def main() -> int:
     p_sc.add_argument("action", nargs="?", default="validate", choices=["validate"])
     p_sc.add_argument("--file", default="", help="YAML 文件路径")
     p_sc.add_argument("--dir", default="", help=".ai/scenarios/ 目录路径")
+    p_sc.add_argument("--coverage", default="", help="docs/spec/<feature>.md 路径，生成需求覆盖矩阵")
     p_sc.add_argument("--project-root", default="", help="项目根目录，默认当前目录")
 
     # ── status ───────────────────────────────────
@@ -411,23 +412,103 @@ def _cmd_loop(args: argparse.Namespace) -> dict:
         )
     project_root = Path(args.project_root) if getattr(args, "project_root", "") else Path.cwd()
 
+    # ── 处理任务输入：文件路径检测 + 内容读取 ──
+    user_input = args.task or ""
+    actual_input = user_input
+    input_type = "plain_prompt"
+
+    # 检测是否是文件路径（相对路径或绝对路径）
+    if user_input:
+        input_path = Path(user_input)
+        # 尝试相对路径或绝对路径
+        resolved_path = input_path if input_path.is_absolute() else project_root / input_path
+
+        if resolved_path.exists() and resolved_path.is_file():
+            # 读取文件内容
+            try:
+                file_content = resolved_path.read_text(encoding="utf-8")
+                # 替换 user_input 为文件内容
+                actual_input = file_content
+                input_type = "file_content"
+                logger.info("Read file content from: %s (%d chars)", resolved_path, len(file_content))
+            except Exception as e:
+                logger.warning("Failed to read file %s: %s, using as plain text", resolved_path, e)
+
+    # ── 自动检测现有 Spec 文件 ──
+    # direct 模式跳过 spec 检测（轻量通道，无 spec 约束）
+    detected_spec_file = getattr(args, "spec_file", "") or ""
+    if not detected_spec_file and mode not in ("direct", "direct-only"):
+        for spec_dir in (project_root / "docs" / "spec", project_root / "spec"):
+            if spec_dir.is_dir():
+                spec_files = sorted(spec_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for sf in spec_files:
+                    if sf.stat().st_size > 200:
+                        detected_spec_file = str(sf.relative_to(project_root))
+                        logger.info("Auto-detected spec file: %s", detected_spec_file)
+                        break
+                if detected_spec_file:
+                    break
+        # 兜底: .ai/spec.md
+        if not detected_spec_file:
+            alt_spec = project_root / ".ai" / "spec.md"
+            if alt_spec.exists() and alt_spec.stat().st_size > 200:
+                detected_spec_file = ".ai/spec.md"
+                logger.info("Auto-detected spec file: .ai/spec.md")
+
+    # ── 自动检测现有 Plan 文件 ──
+    # 仅在未通过 --plan-file 显式指定时才自动检测
+    explicit_plan_file = getattr(args, "plan_file", "") or ""
+    if explicit_plan_file:
+        detected_plan_file = explicit_plan_file
+        logger.info("使用显式指定的 plan file: %s", detected_plan_file)
+    else:
+        detected_plan_file = ""
+        if mode not in ("direct", "direct-only"):
+            for plan_dir in (project_root / "docs" / "plan", project_root / "plan"):
+                if plan_dir.is_dir():
+                    plan_files = sorted(plan_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    for pf in plan_files:
+                        if pf.stat().st_size > 200:
+                            detected_plan_file = str(pf.relative_to(project_root))
+                            logger.info("Auto-detected plan file: %s", detected_plan_file)
+                            break
+                    if detected_plan_file:
+                        break
+
+    # 从现有状态文件中恢复 plan_contracts（full 模式 resume 场景）
+    existing_contracts: list[dict] = []
+    state_file_path = Path(args.state_file) if getattr(args, "state_file", "") else None
+    if state_file_path and state_file_path.exists() and mode in ("dev", "full"):
+        try:
+            existing_state = RunState.model_validate_json(state_file_path.read_text(encoding="utf-8"))
+            existing_contracts = existing_state.plan_contracts or []
+            if existing_contracts:
+                logger.info("从状态文件恢复 %d 个 plan_contracts", len(existing_contracts))
+        except Exception as e:
+            logger.debug("无法从状态文件恢复 plan_contracts: %s", e)
+
+    # plan_contracts 可以为空（dev 模式只用 plan_file 路径，AI 直接读文件）
+    plan_contracts: list[dict] = existing_contracts
+
     state = RunState(
         task_id=f"cli-{int(time.time())}",
         project=project_root.name,
-        project_root=str(project_root),
+        project_root=project_root.as_posix(),
+        plan_contracts=plan_contracts,
         task_intake=TaskIntakeResult(
-            input_type="plain_prompt",
+            input_type=input_type,
             complexity="medium",
             risk_level="L3",
             flow_mode="spec_from_prompt" if mode == "full" else "direct",
-            reason=args.task or f"CLI {mode} mode",
-        ) if args.task else None,
+            reason=user_input[:200] if user_input else f"CLI {mode} mode",
+        ) if actual_input else None,
         metadata={
-            "user_input": args.task,
-            "args_task": args.task,
+            "user_input": user_input,  # 原始输入（可能是文件路径或文本）
+            "actual_input": actual_input,  # 处理后的输入（文件内容或原始文本）
+            "input_type": input_type,
             "scenario_dir": getattr(args, "scenario_dir", "") or "",
-            "plan_file": getattr(args, "plan_file", "") or "",
-            "spec_file": getattr(args, "spec_file", "") or "",
+            "plan_file": detected_plan_file,
+            "spec_file": detected_spec_file,
         },
     )
 
@@ -452,12 +533,14 @@ def _cmd_loop(args: argparse.Namespace) -> dict:
         "duration_ms": (time.perf_counter() - start) * 1000,
     }
 
-    # 如果暂停等待 AI，附加 prompt 信息（使用工具特定的命令）
+    # 如果暂停等待 AI，附加 prompt 信息
     if final.needs_ai_input:
-        project_root = Path(args.project_root) if args.project_root else Path.cwd()
-        target = args.target if hasattr(args, "target") and args.target else None
-        tool_config = _get_tool_config(project_root, target)
-        engines_cmd = tool_config.get("engines_cmd", "engines/run.sh")
+        # 获取 engines_cmd 配置（与 _cmd_loop_continue 保持一致）
+        _state_file_path = Path(args.state_file or "run.json")
+        _project_root = Path(args.project_root) if args.project_root else _state_file_path.parent.resolve()
+        _target = args.target if hasattr(args, "target") and args.target else None
+        _tool_config = _get_tool_config(_project_root, _target)
+        engines_cmd = _tool_config.get("engines_cmd", "engines/run.sh")
 
         result["needs_ai_input"] = True
         result["pending_action"] = final.pending_action
@@ -469,6 +552,89 @@ def _cmd_loop(args: argparse.Namespace) -> dict:
         )
 
     return result
+
+
+# ── Plan 文件解析辅助函数 ─────────────────────────────────────────
+
+def _extract_contracts_from_plan_file(plan_path: Path) -> list[dict]:
+    """从 Plan 文件自动提取 Task Contracts。
+
+    支持解析以下格式的 Plan 文件：
+    1. Task 列表（格式: ### Task N: Title 或 ## Task N / ## T[N]）
+    2. 每个 Task 包含: goal, allowed_files, forbidden_files, budget
+
+    Args:
+        plan_path: Plan 文件路径
+
+    Returns:
+        Task contracts 列表，解析失败返回空列表
+    """
+    import re
+
+    try:
+        content = plan_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("无法读取 Plan 文件 %s: %s", plan_path, e)
+        return []
+
+    contracts = []
+
+    # 匹配 Task 标题: ### T1: xxx 或 ### Task 1: xxx
+    task_pattern = re.compile(r'^###\s+(?:Task\s+)?T?(\d+)\s*[:：]\s*(.+?)(?=\n)', re.MULTILINE)
+
+    # 查找所有 Task
+    tasks = list(task_pattern.finditer(content))
+
+    for i, match in enumerate(tasks):
+        task_num = match.group(1)
+        task_title = match.group(2).strip()
+
+        # 提取该 Task 的内容范围（到下一个 Task 或文件结束）
+        start = match.end()
+        end = tasks[i + 1].start() if i + 1 < len(tasks) else len(content)
+        task_content = content[start:end]
+
+        # 提取 goal: **Goal**: xxx
+        goal = task_title
+        goal_match = re.search(r'\*\*Goal\*\*:\s*(.+?)(?:\n|$)', task_content, re.MULTILINE)
+        if goal_match:
+            goal = goal_match.group(1).strip()
+
+        # 提取 allowed_files: **Allowed Files**: 下的 - `xxx` 列表
+        allowed_files = []
+        files_block_match = re.search(
+            r'\*\*Allowed Files\*\*:\s*\n((?:\s*-\s*[^\n]+\n)+)',
+            task_content,
+            re.MULTILINE
+        )
+        if files_block_match:
+            for line in files_block_match.group(1).split('\n'):
+                line = line.strip()
+                if line.startswith('-'):
+                    # 去掉 "- " 前缀和反引号
+                    f = line.lstrip('-').strip().strip('`')
+                    if f:
+                        allowed_files.append(f)
+
+        # 提取 budget: **Budget**: maxFiles=X, maxLines=Y
+        budget = {"max_files": 5, "max_lines_changed": 200}
+        budget_match = re.search(r'maxFiles=(\d+),\s*maxLines=(\d+)', task_content)
+        if budget_match:
+            budget["max_files"] = int(budget_match.group(1))
+            budget["max_lines_changed"] = int(budget_match.group(2))
+
+        contract = {
+            "task_id": f"T{task_num}",
+            "goal": goal,
+            "allowed_files": allowed_files if allowed_files else ["src/"],
+            "forbidden_files": [],
+            "budget": budget,
+        }
+        contracts.append(contract)
+        logger.debug("提取 Task %s: %s (%d files)", task_num, goal[:30], len(allowed_files))
+
+    logger.info("从 %s 解析出 %d 个 Task Contracts", plan_path.name, len(contracts))
+    return contracts
 
 
 # 恢复暂停的 loop，注入 AI 提交的结果
@@ -512,7 +678,26 @@ def _cmd_loop_continue(args: argparse.Namespace) -> dict:
                 state.metadata["plan_contract_retries"] = 0  # 重置重试计数
                 logger.info("Plan contracts extracted: %d tasks", len(contracts))
             else:
-                logger.warning("plan_result 中无 contracts 字段，plan_contracts 仍为空")
+                # 尝试从 result_data.plan_file 提取
+                plan_file = result_data.get("plan_file")
+                if not plan_file:
+                    # Fallback: 从之前保存的 plan_result 中读取 plan_file
+                    prev_plan_result = state.metadata.get("plan_result", {})
+                    plan_file = prev_plan_result.get("plan_file")
+                if plan_file:
+                    plan_path = Path(state.project_root) / plan_file
+                    if plan_path.exists():
+                        contracts = _extract_contracts_from_plan_file(plan_path)
+                        if contracts:
+                            state.plan_contracts = contracts
+                            state.metadata["plan_contract_retries"] = 0
+                            logger.info("Plan contracts auto-extracted from %s: %d tasks", plan_file, len(contracts))
+                        else:
+                            logger.warning("无法从 %s 提取 contracts", plan_file)
+                    else:
+                        logger.warning("Plan 文件不存在: %s", plan_path)
+                if not state.plan_contracts:
+                    logger.warning("plan_result 中无 contracts 字段且无 plan_file，plan_contracts 仍为空")
         elif action == "generate_scenarios":
             state.metadata["scenarios_result"] = result_data
         elif action in ("execute_task", "confirm_checklist", "lock_plan",
@@ -529,6 +714,43 @@ def _cmd_loop_continue(args: argparse.Namespace) -> dict:
         elif action == "memory":
             state.metadata["memory_ai_called"] = True
             state.metadata["memory_result"] = result_data
+        elif action == "plan_approval":
+            # 用户审核 Plan 结果
+            approved = result_data.get("plan_approved", False)
+            if approved:
+                logger.info("用户批准 Plan，准备进入 TEST_DESIGN")
+                state.metadata["plan_awaiting_approval"] = False
+                state.metadata["plan_approved_by_user"] = True
+                # Plan 锁定，准备进入 TEST_DESIGN
+                state.plan_lock_state = "locked"
+                # 如果 plan_contracts 为空，从 plan_file 自动提取（用户批准前可能未提取）
+                if not state.plan_contracts:
+                    plan_result = state.metadata.get("plan_result", {})
+                    plan_file = result_data.get("plan_file") or plan_result.get("plan_file")
+                    if plan_file:
+                        plan_path = Path(state.project_root) / plan_file
+                        if plan_path.exists():
+                            contracts = _extract_contracts_from_plan_file(plan_path)
+                            if contracts:
+                                state.plan_contracts = contracts
+                                logger.info("Plan approval 时补充提取 %d 个 contracts", len(contracts))
+                        # 同时保存到 metadata 中（兼容后续 resume）
+                    state.metadata["approved_plan_file"] = plan_file
+            else:
+                # 用户拒绝 Plan，需要修改后重新提交
+                logger.info("用户拒绝 Plan，标记为待修改")
+                state.metadata["plan_awaiting_approval"] = False
+                state.metadata["plan_rejected_by_user"] = True
+                # 返回拒绝信息，让用户重新生成 Plan
+                state.pending_action = "generate_plan"
+                state.needs_ai_input = True
+                state.pending_prompt = {
+                    "instruction": (
+                        "用户拒绝了之前的 Plan，请根据用户反馈重新生成 Plan。\n"
+                        "完成后调用: engines/run.sh loop continue --state-file run.json "
+                        "--result '{\"plan_file\": \"docs/plan/xxx.md\", \"summary\": \"...\"}'"
+                    )
+                }
         else:
             state.metadata["ai_result"] = result_data
 
@@ -717,8 +939,8 @@ def _cmd_context(args: argparse.Namespace) -> dict:
 # ── scenario ──────────────────────────────────────
 
 def _cmd_scenario(args: argparse.Namespace) -> dict:
-    """校验 Scenario YAML 文件。"""
-    from engines.scenario.validator import validate_scenario_file, validate_scenario_dir
+    """校验 Scenario YAML 文件，或生成覆盖矩阵。"""
+    from engines.scenario.validator import validate_scenario_file, validate_scenario_dir, compute_coverage_matrix
 
     if args.file:
         result = validate_scenario_file(args.file)
@@ -726,7 +948,12 @@ def _cmd_scenario(args: argparse.Namespace) -> dict:
     elif args.dir:
         results = validate_scenario_dir(args.dir)
         all_valid = all(r["valid"] for r in results)
-        return {"success": True, "all_valid": all_valid, "results": results}
+        resp = {"success": True, "all_valid": all_valid, "results": results}
+        # --coverage 存在时附加覆盖矩阵
+        if args.coverage:
+            cov = compute_coverage_matrix(args.dir, args.coverage)
+            resp["coverage"] = cov
+        return resp
     return {"success": False, "error": "需要 --file 或 --dir"}
 
 

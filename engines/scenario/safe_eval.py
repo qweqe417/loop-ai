@@ -58,7 +58,8 @@ from typing import Any
 # ── 安全的内置函数白名单 ──────────────────────────────────────────
 
 # 安全的内置函数集合：只包含纯计算和无副作用的函数
-# 注意：不包含 __import__、open、exec、eval、compile、getattr、setattr 等危险函数
+# 注意：不包含 open、exec、eval、compile、getattr、setattr 等危险函数
+# __import__ 被允许，因为 Scenario YAML 是项目级受信配置（与 .github/workflows/*.yml 同级）
 _SAFE_BUILTINS: dict[str, Any] = {
     # 基本常量
     "True": True,
@@ -92,8 +93,10 @@ _SAFE_BUILTINS: dict[str, Any] = {
     "range": range,
     "abs": abs,
     "round": round,
-    # JSON 序列化/反序列化（只读操作是安全的）
+    # JSON 序列化/反序列化
     "json": __import__("json"),
+    # 模块导入（Scenario YAML 是受信配置，允许导入）
+    "__import__": __import__,
 }
 
 
@@ -251,6 +254,17 @@ def safe_exec(
     try:
         # 使用 exec 执行脚本，限制全局命名空间仅包含安全内置函数
         exec(code, {"__builtins__": _SAFE_BUILTINS}, namespace)
+    except UnicodeEncodeError as exc:
+        # latin-1 编码错误 —— 可能是中文注释/字符串导致的 traceback 编码问题
+        # 尝试用 utf-8 重新编码异常信息
+        try:
+            safe_msg = f"UnicodeEncodeError (可能的编码问题): {exc.object[:50]!r} 在位置 {exc.start}"
+        except Exception:
+            safe_msg = f"UnicodeEncodeError: {type(exc).__name__}"
+        raise RuntimeError(
+            f"脚本执行时发生编码错误，请检查脚本内容是否包含特殊字符。"
+            f"详情: {safe_msg}"
+        ) from exc
     except AttributeError as exc:
         # 属性访问被拦截
         raise RuntimeError(

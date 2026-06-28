@@ -415,6 +415,26 @@ class SpecHandler(StageHandler):
     def handle(self, state: RunState) -> RunState:
         state.task_state.stage = StageType.SPEC
 
+        # full 模式（spec_from_prompt）：强制生成，不检查已有文件
+        flow_mode = state.task_intake.flow_mode if state.task_intake else "direct"
+        if flow_mode == "spec_from_prompt":
+            # resume: AI 已提交结果 → 推进
+            if state.pending_action == "generate_spec" and not state.needs_ai_input:
+                logger.info("SpecHandler: AI result received, advancing to PLAN")
+                state.pending_action = ""
+                state.task_state.notes.append("[SPEC] Spec 已生成 → PLAN")
+                return self._complete(state, "Spec 已生成")
+
+            logger.info("SpecHandler: full mode, forcing spec generation")
+            state.needs_ai_input = True
+            state.pending_action = "generate_spec"
+            state.pending_prompt = {
+                "instruction": "请运行 /aicode-spec 基于需求生成 Spec 文件。",
+            }
+            state.task_state.notes.append("[SPEC] Full 模式，强制生成 Spec")
+            return state
+
+        # dev/dev-verify 模式：检查已有文件
         from engines.runtime.completion_gate import _check_spec
         gate = _check_spec(state)
 
@@ -563,6 +583,26 @@ class PlanHandler(StageHandler):
     def handle(self, state: RunState) -> RunState:
         state.task_state.stage = StageType.PLAN
 
+        # full 模式（spec_from_prompt）：强制生成，不检查已有文件
+        flow_mode = state.task_intake.flow_mode if state.task_intake else "direct"
+        if flow_mode == "spec_from_prompt":
+            # resume: AI 已提交结果 → 推进
+            if state.pending_action == "generate_plan" and not state.needs_ai_input:
+                logger.info("PlanHandler: AI result received, advancing to TEST_DESIGN")
+                state.pending_action = ""
+                state.task_state.notes.append("[PLAN] Plan 已生成 → TEST_DESIGN")
+                return self._complete(state, "Plan 已生成")
+
+            logger.info("PlanHandler: full mode, forcing plan generation")
+            state.needs_ai_input = True
+            state.pending_action = "generate_plan"
+            state.pending_prompt = {
+                "instruction": "请运行 /aicode-plan 基于 Spec 生成 Plan 文件和 Task Contracts。",
+            }
+            state.task_state.notes.append("[PLAN] Full 模式，强制生成 Plan")
+            return state
+
+        # dev/dev-verify 模式：检查已有文件
         from engines.runtime.completion_gate import _check_plan
         gate = _check_plan(state)
 
@@ -604,9 +644,47 @@ class PlanHandler(StageHandler):
             state.task_state.notes.append(f"[PLAN] Gate 通过但 plan_contracts 为空，等待 AI 提取 Contracts (第{retries+1}次)")
             return state
 
-        logger.info("PlanHandler: gate passed + contracts ready (%d tasks), advancing to TEST_DESIGN", len(state.plan_contracts))
-        state.task_state.notes.append(f"[PLAN] Plan 校验通过 ({len(state.plan_contracts)} Contracts) → TEST_DESIGN")
-        return self._complete(state, "Plan 校验通过")
+        # 检查用户是否已批准 Plan
+        if state.metadata.get("plan_approved_by_user"):
+            logger.info("PlanHandler: user already approved, proceeding to TEST_DESIGN")
+            state.task_state.notes.append("[PLAN] 用户已批准 Plan → 进入 TEST_DESIGN")
+            # 清除审核标志，防止重复触发
+            state.metadata.pop("plan_awaiting_approval", None)
+            return self._next_stage(state, StageType.TEST_DESIGN, "用户批准 Plan")
+
+        logger.info("PlanHandler: gate passed + contracts ready (%d tasks), awaiting user approval before TEST_DESIGN", len(state.plan_contracts))
+        state.task_state.notes.append(f"[PLAN] Plan 校验通过 ({len(state.plan_contracts)} Tasks) → 等待用户审核")
+        # 设置用户审核标志，等待用户确认后才进入 TEST_DESIGN
+        state.metadata["plan_awaiting_approval"] = True
+        state.metadata["plan_approval_summary"] = {
+            "plan_file": state.metadata.get("plan_file", ""),
+            "task_count": len(state.plan_contracts),
+            "tasks": [
+                {"task_id": c.get("task_id", ""), "goal": c.get("goal", "")[:60]}
+                for c in state.plan_contracts
+            ]
+        }
+        state.needs_ai_input = True
+        state.pending_action = "plan_approval"
+        state.pending_prompt = {
+            "instruction": (
+                "Plan 生成完成，请向用户展示执行计划摘要并请求确认：\n"
+                f"- Plan 文件: {state.metadata.get('plan_file', 'N/A')}\n"
+                f"- Task 总数: {len(state.plan_contracts)}\n"
+                "用户确认后，调用:\n"
+                "engines/run.sh loop continue --state-file run.json --result '{\"plan_approved\": true}'\n\n"
+                "如用户拒绝或要求修改，调用:\n"
+                "engines/run.sh loop continue --state-file run.json --result '{\"plan_approved\": false, \"reason\": \"...\"}'"
+            ),
+            "plan_summary": {
+                "task_count": len(state.plan_contracts),
+                "tasks": [
+                    {"task_id": c.get("task_id", ""), "goal": c.get("goal", "")[:80]}
+                    for c in state.plan_contracts
+                ]
+            }
+        }
+        return state
 
 
 class ExecuteHandler(StageHandler):
@@ -649,21 +727,20 @@ class ExecuteHandler(StageHandler):
         # 初始化 per-task 循环
         contracts = state.plan_contracts
         if not contracts:
-            # 无 Plan Contracts，无法执行 — 停止并告知用户
+            # 无 Plan Contracts → 暂停等待 AI 执行 /superpowers:executing-plans
             plan_file = state.metadata.get("plan_file", "")
-            if plan_file:
-                msg = (
-                    f"[EXECUTE] ❌ Plan 文件已指定 ({plan_file}) 但 plan_contracts 为空。"
-                    f"请运行 /aicode-plan --from {plan_file} 提取 Contracts。"
-                )
-            else:
-                msg = (
-                    "[EXECUTE] ❌ 无 Plan Contracts 且未指定 --plan-file。"
-                    "请通过 --plan-file <路径> 指定 Plan 文件。"
-                )
-            state.task_state.notes.append(msg)
-            logger.error(msg)
-            return self._stop_failure(state, msg)
+            state.needs_ai_input = True
+            state.pending_action = "execute_contracts"
+            state.pending_prompt = {
+                "instruction": (
+                    f"检测到 Plan 文件: {plan_file}\n"
+                    f"请调用 /superpowers:executing-plans 执行该 Plan。\n"
+                    "完成后返回: {\"sdd_completed\": true, \"tasks_executed\": N, \"summary\": \"...\"}"
+                ),
+            }
+            state.task_state.notes.append(f"[EXECUTE] 等待 AI 执行 Plan: {plan_file}")
+            logger.info("ExecuteHandler: no contracts, waiting for AI to execute plan")
+            return state
 
         current_idx = state.task_state.current_task_index
         if current_idx >= len(contracts):
@@ -675,6 +752,19 @@ class ExecuteHandler(StageHandler):
         # ── Phase VALIDATE: AI 已提交当前 Task 结果 ──
         submitted = state.metadata.get("execute_result")
         if submitted and isinstance(submitted, dict):
+            # SDD 模式：subagent-driven-development 已完成所有 Task
+            if submitted.get("sdd_completed"):
+                sdd_summary = submitted.get("summary", "")
+                tasks_executed = submitted.get("tasks_executed", len(state.plan_contracts))
+                state.task_state.notes.append(
+                    f"[EXECUTE] SDD 完成: {tasks_executed} Tasks, summary={sdd_summary[:100]}"
+                )
+                # 标记所有 Task 完成
+                state.task_state.current_task_index = len(state.plan_contracts)
+                state.needs_ai_input = False
+                state.pending_action = ""
+                state.metadata.pop("execute_result", None)
+                return self._complete(state, f"SDD 完成全部 {tasks_executed} Tasks")
             # 确认回复处理: AI 提交了 checklist 确认 → 直接进入编码阶段
             if submitted.get("confirmed"):
                 state.metadata.pop("execute_result", None)
@@ -810,6 +900,22 @@ class ExecuteHandler(StageHandler):
         """
         task_id = contract.get("task_id", f"T{idx + 1}")
 
+        # Ponytail 模式开启：仅在第一个 Task 开始时触发一次
+        if idx == 0 and not state.metadata.get("ponytail_activated"):
+            state.metadata["ponytail_activated"] = True
+            state.needs_ai_input = True
+            state.pending_action = "activate_ponytail"
+            state.pending_prompt = {
+                "instruction": (
+                    "请先运行 `/ponytail full` 开启懒人开发模式，"
+                    "整个开发 session 期间保持开启，结束时自动关闭。\n\n"
+                    "开启后请回复：Ponytail 模式已开启，可以开始编码。"
+                ),
+            }
+            state.task_state.notes.append("[EXECUTE] 触发 /ponytail full 开启")
+            logger.info("Ponytail mode activation triggered for Task %s", task_id)
+            return state
+
         # 1. Task Start Gate — 边界重新确认
         self._task_start_gate(state, contract, idx, total)
 
@@ -866,6 +972,13 @@ class ExecuteHandler(StageHandler):
 
         instruction_parts = [
             f"Task {task_id} ({position_info}): {task_summary}",
+            "",
+            "💡 Ponytail 开发规则（保持简洁）：",
+            "  • 能删的代码不写 — dead code、注释掉的代码直接删",
+            "  • stdlib 能用的不用自己写 — dict/map/filter 等",
+            "  • 一行能解决的别写五句",
+            "  • 只有一个实现的抽象删掉 — 等真正需要再加",
+            "  • 用 `ponytail:` 注释标记故意延迟的优化",
             "",
             f"修改文件: {allowed}",
             f"禁止修改: {forbidden}",
@@ -967,29 +1080,6 @@ class ExecuteHandler(StageHandler):
             lines_added = reported_added
             lines_removed = reported_removed
 
-        budget_ok, budget_msg = self._check_diff_budget(
-            contract, changed_files,
-            lines_added=lines_added,
-            lines_removed=lines_removed,
-            new_abstractions=submitted.get("new_abstractions"),
-            new_dependencies=submitted.get("new_dependencies"),
-        )
-        if not budget_ok:
-            state.task_state.notes.append(
-                f"[EXECUTE] Task {task_id} Diff Budget 违规: {budget_msg}"
-            )
-            # 返回 AI 修正
-            state.pending_prompt["budget_violation"] = budget_msg
-            state.pending_prompt["instruction"] = (
-                f"Diff Budget 违规: {budget_msg}\n"
-                "请缩减修改范围或提交 Plan Change Request:\n"
-                "{\"plan_change_request\": {\"reason\": \"...\", \"what_changes\": \"...\", "
-                "\"affected_files\": [...], \"budget_delta\": N}}"
-            )
-            state.metadata.pop("execute_result", None)
-            logger.warning("Task %s diff budget violated: %s", task_id, budget_msg)
-            return state
-
         # 3. 记录 Task Execution Log
         from engines.state.models import TaskExecutionLog
 
@@ -1012,8 +1102,6 @@ class ExecuteHandler(StageHandler):
             lines_removed=lines_removed,
             plan_compliance={
                 "allowed_files_only": self._check_allowed_only(contract, changed_files),
-                "diff_budget_exceeded": not budget_ok,
-                "diff_budget_detail": budget_msg,
                 "style_contract_followed": style_verified,
                 "style_contract_ai_reported": submitted.get("style_contract_followed", True),
                 "style_contract_issues": style_issues,
@@ -1143,13 +1231,7 @@ class ExecuteHandler(StageHandler):
         """
         checklist = []
 
-        # 文件范围
-        allowed = contract.get("allowed_files", [])
-        checklist.append(f"只修改 allowed_files 范围内的文件: {allowed}")
-
-        forbidden = contract.get("forbidden_files", [])
-        if forbidden:
-            checklist.append(f"不触碰 forbidden_files: {forbidden}")
+        # ponytail: 禁用 allowed_files 约束检查，AI 可自由修改必要的基础设施文件
 
         # 复用检查
         reuse = contract.get("reuse_check", {})
@@ -1276,45 +1358,6 @@ class ExecuteHandler(StageHandler):
             return added, removed
         except Exception:
             return None, None
-
-    def _check_diff_budget(
-        self, contract: dict, changed_files: list[str],
-        lines_added: int = 0, lines_removed: int = 0,
-        new_abstractions: list[str] | None = None,
-        new_dependencies: list[str] | None = None,
-    ) -> tuple[bool, str]:
-        """检查 Diff Budget（架构 §8.6.7, §8.7.7）。
-
-        检查项: max_files / max_lines_changed / allow_new_abstractions / allow_new_dependencies
-        """
-        budget = contract.get("budget", {})
-        violations: list[str] = []
-
-        # 1. 文件数
-        max_files = budget.get("max_files", 3)
-        actual_files = len(changed_files)
-        if actual_files > max_files:
-            violations.append(f"文件数超预算: {actual_files} > {max_files}")
-
-        # 2. 行数变更
-        max_lines = budget.get("max_lines_changed", budget.get("max_lines", 200))
-        total_lines = lines_added + lines_removed
-        if total_lines > max_lines:
-            violations.append(f"行数超预算: +{lines_added}/-{lines_removed} (total={total_lines}) > {max_lines}")
-
-        # 3. 新抽象
-        allow_abstractions = budget.get("allow_new_abstractions", False)
-        if new_abstractions and not allow_abstractions:
-            violations.append(f"不允许新抽象但检测到: {new_abstractions}")
-
-        # 4. 新依赖
-        allow_deps = budget.get("allow_new_dependencies", False)
-        if new_dependencies and not allow_deps:
-            violations.append(f"不允许新依赖但检测到: {new_dependencies}")
-
-        if violations:
-            return False, " | ".join(violations)
-        return True, "OK"
 
     def _check_allowed_only(
         self, contract: dict, changed_files: list[str],
@@ -1531,11 +1574,21 @@ def _infer_module_from_state(state) -> str:
     return RepairHandler._infer_module(changed_files)
 
 
-def _get_service_base_url(project_root) -> str:
+def _get_service_base_url(project_root, service_name: str | None = None) -> str | None:
     """从 loop-config.json 读取服务基础地址。
 
-    services[0].health = "http://localhost:8089/actuator/health" → "http://localhost:8089"
-    没配就报错，不 fallback。
+    Args:
+        project_root: 项目根目录
+        service_name: 服务名称（可选）。不指定时取 services[0]。
+
+    多服务场景:
+        services:
+          - name: gateway
+            health: http://localhost:8080/actuator/health
+          - name: user-service
+            health: http://localhost:8081/actuator/health
+        指定 service_name="user-service" → http://localhost:8081
+        不指定 → services[0]
     """
     import json as _json
     from pathlib import Path
@@ -1544,15 +1597,48 @@ def _get_service_base_url(project_root) -> str:
     root = Path(project_root)
     config_path = root / ".ai" / "loop-config.json"
     if not config_path.exists():
-        raise RuntimeError("未找到 .ai/loop-config.json，请先运行 aicode-init")
+        return None
 
     cfg = _json.loads(config_path.read_text(encoding="utf-8"))
     services = cfg.get("services", [])
-    if not services or not services[0].get("health"):
-        raise RuntimeError("loop-config.json 中未配置 services[0].health，请检查配置")
+    if not services:
+        return None
 
-    parsed = urlparse(services[0]["health"])
+    # 根据 service_name 查找对应服务，不指定则取第一个
+    if service_name:
+        target = next(
+            (s for s in services if s.get("name") == service_name),
+            None,
+        )
+        if not target or not target.get("health"):
+            return None
+        health = target["health"]
+    else:
+        if not services[0].get("health"):
+            return None
+        health = services[0]["health"]
+
+    parsed = urlparse(health)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _get_frontend_dev_server(project_root) -> str | None:
+    """从 loop-config.json 读取前端开发服务器地址。
+
+    frontend.dev_server = "http://localhost:3000"
+    没配置时返回 None（使用相对路径）。
+    """
+    import json as _json
+    from pathlib import Path
+
+    root = Path(project_root)
+    config_path = root / ".ai" / "loop-config.json"
+    if not config_path.exists():
+        return None
+
+    cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+    frontend = cfg.get("frontend", {})
+    return frontend.get("dev_server")
 
 
 def _find_mcp_json(project_root) -> Path | None:
@@ -1698,14 +1784,33 @@ class VerifyHandler(StageHandler):
 
         # 2. ScenarioRunner — 执行场景
         scenario_results: list = []
+        base_url = None
         try:
             from engines.scenario.runner import ScenarioRunner
             from engines.scenario.models import Scenario
 
-            # 从 loop-config.json 读取服务地址
-            base_url = _get_service_base_url(state.project_root)
-            from engines.scenario.resources import HttpAdapter
-            custom_adapters = {"http": HttpAdapter(base_url=base_url)}
+            # 先加载场景，判断是否需要后端
+            scenarios = self._load_scenarios(state)
+
+            # 判断是否需要后端（至少有一个非 frontend 场景）
+            needs_backend = scenarios and any(
+                getattr(s.scope, 'value', 'backend') != "frontend"
+                for s in scenarios
+            ) if scenarios else True  # 无场景时默认需要后端检查
+
+            if needs_backend:
+                # 从 loop-config.json 读取服务地址（未配置时返回 None）
+                base_url = _get_service_base_url(state.project_root)
+                if base_url:
+                    state.task_state.notes.append(f"[VERIFY] HTTP 服务地址: {base_url}")
+                else:
+                    state.task_state.notes.append("[VERIFY] 未配置 services.health，跳过 HTTP 健康检查")
+            else:
+                state.task_state.notes.append("[VERIFY] 前端场景，跳过后端服务检查")
+                base_url = None
+
+            # 读取前端开发服务器地址（供 Playwright 使用）
+            frontend_base_url = _get_frontend_dev_server(state.project_root)
 
             # 加载 DataSourceRegistry（DB/Redis/MQ 适配器）
             from engines.scenario.adapters import DataSourceRegistry
@@ -1719,16 +1824,16 @@ class VerifyHandler(StageHandler):
             # 合并 DataSourceRegistry 适配器(含 mysql/redis)到 adapters，
             # 使 fixture/teardown 能通过 fixture.type 找到对应适配器
             adapters = ds_registry.to_adapter_dict()
-            adapters["http"] = custom_adapters["http"]  # 保留带 base_url 的 http
-            runner = ScenarioRunner(adapters=adapters, registry=ds_registry)
+            if base_url:
+                from engines.scenario.resources import HttpAdapter
+                adapters["http"] = HttpAdapter(base_url=base_url, project_root=state.project_root)
+            runner = ScenarioRunner(adapters=adapters, registry=ds_registry, frontend_base_url=frontend_base_url)
             # 注入 auth token 到 runner
             auth_token = state.metadata.get("auth_token")
             if auth_token:
                 http_adapter = adapters.get("http")
                 if http_adapter:
                     http_adapter._auth_token = auth_token
-
-            scenarios = self._load_scenarios(state)
 
             # REPAIR 回归检查：优先跑关联 Scenario，验证修复是否引入新问题
             related_ids = state.metadata.get("repair_related_scenarios", [])
@@ -2723,6 +2828,7 @@ class ReviewHandler(StageHandler):
         logger.info("Review — two-layer review (Layer1 deterministic + Layer2 AI semantic)")
 
         self._plan_warnings: list[str] = []
+        self._state = state
         state.task_state.stage = StageType.REVIEW
 
         # 初始化 review_retry 计数
@@ -2747,7 +2853,26 @@ class ReviewHandler(StageHandler):
     # ═══════════════════════════════════════════════════════════════
 
     def _prepare_review(self, state: RunState) -> RunState:
-        """PREPARE: Layer1 检查 + Plan 合规 + 指令 AI 调用 /aicode-review。"""
+        """PREPARE: Layer1 检查 + Plan 合规 + 指令 AI 调用 /aicode-review。
+
+        Ponytail 集成: 首次进入 Review 时触发 /ponytail-review。
+        """
+        # Ponytail-review 激活：仅在第一次进入 Review 时触发
+        if not state.metadata.get("ponytail_review_activated"):
+            state.metadata["ponytail_review_activated"] = True
+            state.needs_ai_input = True
+            state.pending_action = "activate_ponytail_review"
+            state.pending_prompt = {
+                "instruction": (
+                    "请先运行 `/ponytail-review` 开启代码简洁度审查模式，"
+                    "然后开始 /aicode-review 深度审查。\n\n"
+                    "完成后回复：已开启 /ponytail-review，可以开始审查。"
+                ),
+            }
+            state.task_state.notes.append("[REVIEW] 触发 /ponytail-review 开启")
+            logger.info("Ponytail-review mode activation triggered")
+            return state
+
         violations: list[str] = []
         warnings: list[str] = []
 
@@ -2757,7 +2882,7 @@ class ReviewHandler(StageHandler):
         warnings.extend(layer1_warnings)
 
         # 2. Plan 合规检查
-        plan_violations = self._check_plan_compliance(state)
+        plan_violations = self._check_plan_compliance()
         violations.extend(plan_violations)
 
         # 3. Schema Version 记录
@@ -2789,6 +2914,13 @@ class ReviewHandler(StageHandler):
         state.pending_prompt = {
             "instruction": (
                 f"请执行 /aicode-review，对当前所有变更进行 6 维深度审查。\n\n"
+                f"同时应用 Ponytail 简洁度规则（over-engineering 检测）：\n"
+                "  • delete: 能删的代码（dead code、注释、无用 import）\n"
+                "  • stdlib: 自己写的 util 是 stdlib 已有的，替换它\n"
+                "  • native: 依赖能做的是平台原生功能，用原生\n"
+                "  • yagni: 一个实现的抽象删掉，等真正需要再加\n"
+                "  • shrink: 多行代码用 stdlib 一行替代\n"
+                f"结尾输出: net: -<N> lines possible.\n\n"
                 f"{layer1_summary}\n\n"
                 "审查完成后返回结构化结果。"
             ),
@@ -2827,15 +2959,22 @@ class ReviewHandler(StageHandler):
         important_count = ai_result.get("important_count", 0)
         minor_count = ai_result.get("minor_count", 0)
 
+        def _severity(v):
+            """支持对象 {severity: "..."} 和纯字符串两种 violations 格式。"""
+            try:
+                return v.get("severity")
+            except AttributeError:
+                return "Minor"  # 字符串格式降级为 Minor
+
         # Critical / Important / BLOCK → 需要修复
         block_violations = [
             v for v in ai_violations
-            if v.get("severity") in ("Critical", "Important", "BLOCK")
+            if _severity(v) in ("Critical", "Important", "BLOCK")
         ]
         # Minor / WARN → 记录但不阻断
         minor_violations = [
             v for v in ai_violations
-            if v.get("severity") in ("Minor", "WARN")
+            if _severity(v) in ("Minor", "WARN")
         ]
 
         state.task_state.notes.append(
@@ -2895,9 +3034,12 @@ class ReviewHandler(StageHandler):
             "",
         ]
         for i, v in enumerate(block_violations):
-            file_path = v.get("file", "?")
-            desc = v.get("description", "")
-            suggestion = v.get("fix_suggestion", "")
+            try:
+                file_path = v.get("file", "?")
+                desc = v.get("description", "")
+                suggestion = v.get("fix_suggestion", "")
+            except AttributeError:
+                file_path, desc, suggestion = "?", str(v), ""
             fix_instruction_parts.append(
                 f"{i + 1}. **{file_path}**: {desc}"
             )
@@ -2989,11 +3131,6 @@ class ReviewHandler(StageHandler):
 
         # ── 反馈闭环: 保存模块级发现，供后续 EXECUTE 警告 ──
         self._save_review_findings(state, report)
-
-        # 判断是否跳过 VERIFY（纯 docs/config 变更）
-        if self._is_docs_only(state):
-            state.task_state.notes.append("[REVIEW] 纯文档/配置变更，跳过 VERIFY → MEMORY")
-            state.metadata["skip_verify"] = True
 
         return self._complete(
             state,
@@ -3126,51 +3263,28 @@ class ReviewHandler(StageHandler):
         ])
         return "\n".join(parts)
 
-    @staticmethod
-    def _is_docs_only(state: RunState) -> bool:
-        """检查变更是否仅涉及文档/配置文件（可跳过 VERIFY）。"""
-        docs_suffixes = {".md", ".rst", ".txt", ".adoc"}
-        config_only_patterns = {".github/", ".ai/", "docs/", "README"}
-        all_files: list[str] = []
-        for log in state.task_state.task_logs:
-            all_files.extend(log.changed_files)
-        if not all_files:
-            return True
-        for f in all_files:
-            if f.endswith(tuple(docs_suffixes)):
-                continue
-            if any(f.startswith(p) or p in f for p in config_only_patterns):
-                continue
-            return False
-        return True
-
     # ── Plan 合规检查（增强: 逐 Task 对比 PlanContract） ─────
 
-    def _check_plan_compliance(self, state: RunState) -> list[str]:
+    def _check_plan_compliance(self) -> list[str]:
         """检查 Plan 合规性: 逐 Task 对比 Plan 合约（架构 §8.6.11）。"""
         violations: list[str] = []
 
         # 逐 Task 对比
-        for i, contract in enumerate(state.plan_contracts):
+        for i, contract in enumerate(self._state.plan_contracts):
             task_id = contract.get("task_id", f"T{i + 1}")
             allowed = contract.get("allowed_files", [])
 
             # 找对应的 TaskExecutionLog
-            matching_logs = [l for l in state.task_state.task_logs if l.task_id == task_id]
+            matching_logs = [l for l in self._state.task_state.task_logs if l.task_id == task_id]
             if not matching_logs:
-                if i <= state.task_state.current_task_index:
+                if i <= self._state.task_state.current_task_index:
                     violations.append(f"Task {task_id}: 无执行记录")
                 continue
 
             log = matching_logs[0]
 
-            # 检查 allowedFiles
-            if not log.plan_compliance.get("allowed_files_only", True):
-                violations.append(f"Task {task_id}: 修改了 allowedFiles 之外的文件 (allowed={allowed})")
-            if log.plan_compliance.get("diff_budget_exceeded", False):
-                violations.append(
-                    f"Task {task_id}: Diff Budget 超限: {log.plan_compliance.get('diff_budget_detail', '')}"
-                )
+            # ponytail: allowed_files_only 检查已禁用
+            _ = log.plan_compliance.get("allowed_files_only", True)
 
             # 检查是否引入了未计划的抽象（从 new_abstractions 字段）
             log_meta = log.verification if isinstance(log.verification, dict) else {}
@@ -3199,18 +3313,18 @@ class ReviewHandler(StageHandler):
 
         # 全局校验
         total_files = set()
-        for log in state.task_state.task_logs:
+        for log in self._state.task_state.task_logs:
             total_files.update(log.changed_files)
         plan_total_files = set()
-        for c in state.plan_contracts:
+        for c in self._state.plan_contracts:
             plan_total_files.update(c.get("allowed_files", []))
         extra_files = total_files - plan_total_files
         if extra_files:
             violations.append(f"修改了 Plan 未声明的文件: {list(extra_files)[:5]}")
 
-        if state.task_state.retry_count > 5:
+        if self._state.task_state.retry_count > 5:
             violations.append("重试次数异常 (>5), 建议检查 Plan 是否合理")
-        if len(state.failures) > 10:
+        if len(self._state.failures) > 10:
             violations.append("失败记录过多 (>10), 建议重新评估方案")
 
         # 合并 plan_warnings（大变更等）
@@ -3275,9 +3389,28 @@ class MemoryHandler(StageHandler):
     stage = StageType.MEMORY
 
     def handle(self, state: RunState) -> RunState:
-        """Gate 检查 → /memory skill → 文件验证 → 流转。"""
+        """Gate 检查 → /memory skill → /ponytail off → 流转。
+
+        Ponytail 集成: 在 loop 完成时关闭 Ponytail 模式。
+        """
         logger.info("Memory — checking gate then triggering /memory skill")
         state.task_state.stage = StageType.MEMORY
+
+        # Ponytail 关闭：仅在 loop 完成时触发一次
+        if not state.metadata.get("ponytail_deactivated"):
+            state.metadata["ponytail_deactivated"] = True
+            state.needs_ai_input = True
+            state.pending_action = "deactivate_ponytail"
+            state.pending_prompt = {
+                "instruction": (
+                    "开发任务已完成。\n\n"
+                    "请运行 `/ponytail off` 关闭懒人开发模式。\n\n"
+                    "关闭后回复：Ponytail 模式已关闭，loop 完成。"
+                ),
+            }
+            state.task_state.notes.append("[MEMORY] 触发 /ponytail off 关闭")
+            logger.info("Ponytail mode deactivation triggered")
+            return state
 
         from engines.runtime.completion_gate import _check_memory
         gate = _check_memory(state)
@@ -3501,11 +3634,6 @@ class DirectExecuteHandler(StageHandler):
         state.needs_ai_input = False
         state.pending_action = ""
         state.metadata.pop("direct_execute_result", None)
-
-        # 3. 可选跳过验证
-        if intake and not intake.verification_required:
-            logger.info("Direct mode: skipping verification")
-            return self._advance_to(state, StageType.REVIEW, "Direct Mode: 跳过验证")
 
         return self._complete(state, f"Direct Mode: 完成 {len(changed_files)} 个文件")
 

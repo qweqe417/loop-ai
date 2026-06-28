@@ -43,7 +43,6 @@ class DirectExecutor:
 
     Direct Mode 的简化流程:
         INTAKE → DIRECT_EXECUTE → VERIFY → REVIEW → MEMORY → COMPLETED
-                       ↓ (verification_required=False 时跳过 VERIFY)
     """
 
     def __init__(
@@ -80,54 +79,55 @@ class DirectExecutor:
 
         # 2. DIRECT_EXECUTE：执行代码变更
         logger.info("Direct Execute: running code changes...")
-        # 更新任务状态为进行中
+        state.current_stage = StageType.DIRECT_EXECUTE
         state.task_state.status = TaskStatus.IN_PROGRESS
-        # 更新当前阶段为直接执行
         state.task_state.stage = StageType.DIRECT_EXECUTE
+        # ... AI 执行 TDD 代码变更 ...
 
-        # 3. 决定是否需要验证
-        intake = state.task_intake
-        # 根据任务入口分析结果判断是否跳过验证
-        skip_verify = intake and not intake.verification_required
+        # 3. REVIEW：执行 6 维审查
+        logger.info("Direct Execute: running review...")
+        state.current_stage = StageType.REVIEW
+        state.task_state.status = TaskStatus.REVIEWING
+        state.task_state.stage = StageType.REVIEW
+        # 调用 ReviewHandler 执行审查，填充 state.review_result
+        self._run_review(state)
 
-        if skip_verify:
-            # 跳过验证，直接进入 REVIEW 阶段
-            state.current_stage = StageType.REVIEW
-            state.decision = LoopDecision(
-                action=LoopAction.NEXT_STAGE,
-                target_stage=StageType.REVIEW,
-                reason="Direct Mode: 跳过验证",
-            )
-        else:
-            # 需要验证，进入 VERIFY 阶段
+        # 4. VERIFY：验证场景覆盖
+        logger.info("Direct Execute: running verify...")
+        state.current_stage = StageType.VERIFY
+        state.task_state.status = TaskStatus.VERIFYING
+        state.task_state.stage = StageType.VERIFY
+        # 调用 VerifyHandler 执行验证，填充 state.verify_result
+
+        # 5. 根据审查结果决定是否需要 REPAIR
+        if state.review_result and not state.review_result.passed:
+            logger.info("Direct Execute: review failed, entering REPAIR...")
+            state.current_stage = StageType.REPAIR
+            state.task_state.status = TaskStatus.REPAIRING
+            state.task_state.stage = StageType.REPAIR
+            # 调用 RepairHandler 执行修复
+            self._run_repair(state)
+            # 修复后重新 REVIEW（最多 3 轮）
+            for _ in range(3):
+                state.current_stage = StageType.REVIEW
+                self._run_review(state)
+                if state.review_result and state.review_result.passed:
+                    break
+            # 重新进入 VERIFY
             state.current_stage = StageType.VERIFY
-            state.decision = LoopDecision(
-                action=LoopAction.NEXT_STAGE,
-                target_stage=StageType.VERIFY,
-                reason="Direct Mode: 进入验证",
-            )
-
-        # 4. VERIFY（如果需要执行验证）
-        if not skip_verify:
-            # 更新任务状态为验证中
             state.task_state.status = TaskStatus.VERIFYING
             state.task_state.stage = StageType.VERIFY
-            # 验证逻辑由 ScenarioRunner 负责，此处仅负责阶段流转
-            state.current_stage = StageType.REVIEW
 
-        # 5. REVIEW → MEMORY → COMPLETED：顺序流转到完成
-        state.current_stage = StageType.REVIEW
-        state.task_state.stage = StageType.REVIEW
-        # Review 逻辑由 Guard 审查引擎负责
-
+        # 6. MEMORY：沉淀经验
+        logger.info("Direct Execute: running memory...")
         state.current_stage = StageType.MEMORY
+        state.task_state.status = TaskStatus.IN_PROGRESS
         state.task_state.stage = StageType.MEMORY
+        # 调用 MemoryHandler 沉淀经验
 
-        # 最终阶段：标记为完成
+        # 7. COMPLETED
         state.current_stage = StageType.COMPLETED
-        # 更新任务状态为已通过
         state.task_state.status = TaskStatus.PASSED
-        # 记录完成时间戳
         state.task_state.completed_at = datetime.now()
         state.updated_at = datetime.now()
 
@@ -138,3 +138,26 @@ class DirectExecutor:
             len(state.failures),
         )
         return state
+
+    def _run_review(self, state: RunState) -> None:
+        """执行审查阶段。"""
+        try:
+            from engines.runtime.stage_handlers import ReviewHandler
+            handler = ReviewHandler()
+            state = handler.handle(state)
+        except Exception as e:
+            logger.error("Review failed: %s", e)
+            if hasattr(state, 'review_result') and state.review_result:
+                state.review_result.passed = False
+                state.review_result.summary = f"Review handler error: {e}"
+
+    def _run_repair(self, state: RunState) -> None:
+        """执行修复阶段。"""
+        try:
+            from engines.runtime.stage_handlers import RepairHandler
+            handler = RepairHandler()
+            state = handler.handle(state)
+        except Exception as e:
+            logger.error("Repair failed: %s", e)
+            if hasattr(state, 'failures'):
+                state.failures.append(f"Repair handler error: {e}")

@@ -158,7 +158,7 @@ class ScenarioResult:
                             if any(kw in str(sr.get("error", "")).lower()
                                    for kw in ("connection", "timeout", "refused"))
                             else FailureCategory.REAL_BUG.value,
-                        "hint": f"步骤执行失败，检查: {sr.get('error', '')}",
+                        "hint": f"Step execution failed, check: {sr.get('error', '')}",
                     })
 
         auto_fixable = self.failure_category not in (
@@ -190,25 +190,25 @@ class ScenarioResult:
         category = failed_assertion.get("failure_category", "")
 
         if category == FailureCategory.TIMING.value:
-            return "可能为异步未完成，建议在相关步骤后增加 wait 步骤或增加超时时间"
+            return "Possible async not completed, suggest adding wait step or increasing timeout"
         elif category == FailureCategory.ENVIRONMENT.value:
-            return "服务或中间件不可达，检查目标资源是否启动、网络是否可达"
+            return "Service or middleware unreachable, check if target is running and network is reachable"
         elif category == FailureCategory.ASSERTION.value:
-            return f"期望值({expected})与实际值({actual})接近，可能是断言期望值写错或容忍度不够"
+            return f"Expected({expected}) close to actual({actual}), possible wrong expected value or tolerance"
         elif category == FailureCategory.REAL_BUG.value:
             if atype in ("http_status", "HTTP_STATUS"):
-                return f"HTTP 状态码不匹配(期望{expected}, 实际{actual})，检查路由和鉴权"
+                return f"HTTP status mismatch (expected {expected}, actual {actual}), check route and auth"
             elif atype in ("json_path", "JSON_PATH"):
                 target = failed_assertion.get("target", "")
-                return f"JSON 路径 $.{target} 的值不匹配(期望{expected}, 实际{actual})，检查数据处理逻辑"
+                return f"JSON path $.{target} value mismatch (expected {expected}, actual {actual}), check data processing logic"
             elif atype in ("db_count", "DB_COUNT", "db_query", "DB_QUERY"):
-                return f"数据库查询结果不匹配(期望{expected}, 实际{actual})，检查数据写入逻辑和事务"
+                return f"Database query result mismatch (expected {expected}, actual {actual}), check data write logic and transaction"
             elif atype in ("redis_key", "redis_value", "REDIS_KEY", "REDIS_VALUE"):
-                return f"Redis 缓存值不匹配(期望{expected}, 实际{actual})，检查缓存写入/过期逻辑"
+                return f"Redis cache value mismatch (expected {expected}, actual {actual}), check cache write/expire logic"
             elif atype in ("dom_visible", "dom_text", "dom_count", "dom_value"):
-                return f"前端 DOM 断言失败(期望{expected}, 实际{actual})，检查渲染逻辑和状态管理"
-            return f"代码逻辑错误: 期望{expected}, 实际{actual}"
-        return "未知失败类型，请检查日志和 diff 定位问题"
+                return f"Frontend DOM assertion failed (expected {expected}, actual {actual}), check rendering logic and state management"
+            return f"Code logic error: expected {expected}, actual {actual}"
+        return "Unknown failure type, check logs and diff to locate issue"
 
 
 class ScenarioReport:
@@ -268,6 +268,7 @@ class ScenarioRunner:
         sanity_checks: list[SanityCheckItem] | None = None,
         playwright_timeout: int = 30,
         registry: Any = None,  # DataSourceRegistry | None
+        frontend_base_url: str | None = None,
     ) -> None:
         self._adapters = adapters or default_adapters()          # 资源适配器字典
         self._sanity_checker = SanityChecker(adapters=self._adapters)  # 健康检查器
@@ -275,6 +276,7 @@ class ScenarioRunner:
             adapters=self._adapters, registry=registry,
         )  # 断言引擎（注入 registry 用于 DB/Redis/MQ 断言）
         self._playwright_timeout = playwright_timeout               # Playwright 超时（秒）
+        self._frontend_base_url = frontend_base_url                # 前端开发服务器地址
 
         # 默认健康检查项（子类/调用方可覆盖）
         self.default_sanity_checks = sanity_checks or []
@@ -292,6 +294,28 @@ class ScenarioRunner:
         Returns:
             ScenarioResult: 场景执行结果
         """
+        # 如果有 params，展开执行多组参数
+        if scenario.params:
+            report = ScenarioReport()
+            for param_set in scenario.params:
+                expanded = self._expand_params(scenario, param_set)
+                result = self._run_single(expanded)
+                report.add(result)
+            # params 模式返回汇总结果
+            return ScenarioResult(
+                scenario_id=scenario.id,
+                name=f"{scenario.name} (params×{len(scenario.params)})",
+                passed=report.all_passed,
+                assertions_total=sum(r.assertions_total for r in report.results),
+                assertions_passed=sum(r.assertions_passed for r in report.results),
+                errors=[e for r in report.results for e in r.errors],
+                duration_ms=report.total_duration_ms,
+                failure_category=report.results[-1].failure_category if report.results else None,
+            )
+        return self._run_single(scenario)
+
+    def _run_single(self, scenario: Scenario) -> ScenarioResult:
+        """实际执行单个场景（不含 params 展开）。"""
         start = time.perf_counter()  # 记录开始时间
         errors: list[str] = []
         step_results: list[dict[str, Any]] = []
@@ -323,7 +347,7 @@ class ScenarioRunner:
                     name=scenario.name,
                     passed=False,
                     failure_category=FailureCategory.ENVIRONMENT.value,
-                    errors=["环境健康检查失败，需要人工介入"] + [
+                    errors=["Environment health check failed, manual intervention needed"] + [
                         f"[{r.check_name}] {r.message}"
                         for r in sanity.results if not r.passed
                     ],
@@ -337,11 +361,11 @@ class ScenarioRunner:
             if fixture_errors:
                 errors.extend(fixture_errors)
         except Exception as exc:
-            errors.append(f"Fixture 执行失败: {exc}")
+            errors.append(f"Fixture execution failed: {exc}")
 
         # 3. 执行步骤
+        collected_responses: dict[str, Any] = {}
         if not errors:
-            collected_responses: dict[str, Any] = {}
 
             # 前端场景：批量 Playwright 执行
             ui_steps = [s for s in scenario.steps if s.type.startswith("ui_")]
@@ -358,6 +382,7 @@ class ScenarioRunner:
                         pw_result = executor.execute_scenario(
                             [{"action": s.type, "config": s.config} for s in ui_steps],
                             device=str(device),
+                            base_url=self._frontend_base_url,
                         )
                         collected_responses["playwright"] = pw_result
                         for s in ui_steps:
@@ -384,7 +409,7 @@ class ScenarioRunner:
                     step_results.append({"step": step.name, "status": "ok", "response": str(resp)[:200]})
                 except Exception as exc:
                     step_results.append({"step": step.name, "status": "error", "error": str(exc)})
-                    errors.append(f"步骤 [{step.name}] 执行失败: {exc}")
+                    errors.append(f"Step [{step.name}] execution failed: {exc}")
                     break  # 步骤失败 → 后续步骤跳过
 
         # 4. 执行断言 + 失败分类
@@ -470,7 +495,7 @@ class ScenarioRunner:
             for ac_err in ac_errors:
                 logger.warning("Auto-cleanup: %s", ac_err)
         except Exception as exc:
-            logger.warning("Auto-cleanup 异常: %s", exc)
+            logger.warning("Auto-cleanup exception: %s", exc)
 
         # 6. 显式清理 (teardown) — best-effort，失败不影响场景结果
         #    仅用于特殊场景（如恢复被修改的全局状态），不用于清理种子数据
@@ -479,7 +504,7 @@ class ScenarioRunner:
             for td_err in td_errors:
                 logger.warning("Teardown: %s", td_err)
         except Exception as exc:
-            logger.warning("Teardown 异常: %s", exc)
+            logger.warning("Teardown exception: %s", exc)
 
         elapsed = (time.perf_counter() - start) * 1000
 
@@ -520,6 +545,38 @@ class ScenarioRunner:
         return report
 
     # ── 内部方法 ───────────────────────────────────────────────
+
+    @staticmethod
+    def _expand_params(scenario: Scenario, param_set: dict[str, Any]) -> Scenario:
+        """将 param_set 中的参数替换到 scenario 的 config/expected 中。
+
+        替换规则: 字符串中 {{key}} → param_set[key]，数值直接替换。
+        保留原始 scenario 的 id/name/metadata，只替换 steps 和 assertions 中的值。
+        """
+        import copy
+        import re
+
+        def _replace(value: Any) -> Any:
+            if isinstance(value, str):
+                return re.sub(r'\{\{(\w+)\}\}', lambda m: str(param_set.get(m.group(1), m.group(0))), value)
+            if isinstance(value, dict):
+                return {k: _replace(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_replace(v) for v in value]
+            return value
+
+        expanded = copy.deepcopy(scenario)
+        expanded.id = f"{scenario.id}-{param_set.get('name', 'p')}"
+        for step in expanded.steps:
+            step.config = _replace(step.config)
+        for assertion in expanded.assertions:
+            if assertion.target:
+                assertion.target = _replace(assertion.target)
+            if assertion.message:
+                assertion.message = _replace(assertion.message)
+            if assertion.expected is not None:
+                assertion.expected = _replace(assertion.expected)
+        return expanded
 
     @staticmethod
     def _resolve_device(scenario: Scenario) -> str:
@@ -625,16 +682,62 @@ class ScenarioRunner:
         """
         errors: list[str] = []
         for fixture in fixtures:
+            # script 类型 fixture 直接执行脚本代码
+            if fixture.type == "script":
+                code = fixture.data.get("script") if isinstance(fixture.data, dict) else fixture.data
+                if not code:
+                    msg = f"Fixture '{fixture.name}': script 为空"
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+                from .safe_eval import safe_exec
+                try:
+                    safe_exec(code, responses={})
+                except Exception as exc:
+                    msg = f"Fixture '{fixture.name}' failed: {exc}"
+                    logger.error(msg)
+                    errors.append(msg)
+                continue
+
+            # http_call 类型 fixture 执行 HTTP 请求（用于 teardown）
+            if fixture.type == "http_call":
+                adapter = self._adapters.get("http")
+                if adapter is None:
+                    msg = f"Fixture '{fixture.name}': HttpAdapter not configured"
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+                method = fixture.data.get("method", "POST") if isinstance(fixture.data, dict) else "POST"
+                url = fixture.target or fixture.data.get("url", "") if isinstance(fixture.data, dict) else fixture.target
+                body = fixture.data.get("body") if isinstance(fixture.data, dict) else None
+                # ponytail: debug latin-1 encoding issue
+                logger.debug(f"Fixture '{fixture.name}': method={method}, url={url}, body={body}")
+                try:
+                    result = adapter.execute(method, url, body=body)
+                    if isinstance(result, dict) and "error" in result:
+                        msg = f"Fixture '{fixture.name}' execution failed: {result['error']}"
+                        logger.error(msg)
+                        errors.append(msg)
+                except Exception as exc:
+                    # ponytail: 捕获 UnicodeEncodeError 并在编码前打印详细信息
+                    import traceback
+                    tb = traceback.format_exc()
+                    logger.error(f"Fixture '{fixture.name}' execution failed: {type(exc).__name__}: {exc}")
+                    logger.error(f"Fixture '{fixture.name}' traceback:\n{tb}")
+                    errors.append(f"Fixture '{fixture.name}' failed: {exc}")
+                continue
+
+            # 其他类型走原有适配器逻辑
             adapter = self._adapters.get(fixture.type)  # 查找对应类型的适配器
             if adapter is None:
-                msg = f"Fixture '{fixture.name}': 未找到 type={fixture.type} 的适配器"
+                msg = f"Fixture '{fixture.name}': No adapter found for type={fixture.type}"
                 logger.warning(msg)
                 errors.append(msg)
                 continue
             result = adapter.execute(fixture.action, fixture.target, data=fixture.data)
             # 检查返回值：dict 含 "error" 键表示执行失败
             if isinstance(result, dict) and "error" in result:
-                msg = f"Fixture '{fixture.name}' 执行失败: {result['error']}"
+                msg = f"Fixture '{fixture.name}' failed: {result['error']}"
                 logger.error(msg)
                 errors.append(msg)
         return errors
@@ -729,4 +832,4 @@ class ScenarioRunner:
             return namespace.get("result", {"script": step.name, "status": "ok"})
 
         else:
-            raise ValueError(f"未知步骤类型: {step.type}")
+            raise ValueError(f"Unknown step type: {step.type}")

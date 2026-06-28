@@ -74,7 +74,11 @@ class PlaywrightExecutor:
         "tablet": "iPad Pro",
     }
 
-    def __init__(self, headless: bool = True, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        headless: bool = True,
+        timeout: int = 30,
+    ) -> None:
         # 查找 Playwright Skill 的 run.js 路径
         self._run_js = _find_run_js()
         # 是否使用无头模式（不显示浏览器窗口）
@@ -89,6 +93,7 @@ class PlaywrightExecutor:
 
     def execute_scenario(
         self, steps: list[dict], device: str = "pc", timeout: int | None = None,
+        base_url: str | None = None,
     ) -> dict:
         """将 Scenario steps 翻译为 Playwright 脚本并执行。
 
@@ -96,6 +101,7 @@ class PlaywrightExecutor:
             steps: ScenarioStep 列表（action=ui_* 的步骤）
             device: pc | mobile | tablet
             timeout: 超时秒数（覆盖构造函数中的默认值）
+            base_url: 前端开发服务器地址，从 loop-config.json 读取
 
         Returns:
             {"dom_snapshot": ..., "screenshots": [...], "console": [...]}
@@ -105,7 +111,7 @@ class PlaywrightExecutor:
             return {"error": "Playwright Skill run.js not found"}
 
         # 生成 Playwright 脚本
-        script = self._generate_script(steps, device)
+        script = self._generate_script(steps, device, base_url)
 
         # 写入临时文件
         with tempfile.NamedTemporaryFile(
@@ -135,7 +141,7 @@ class PlaywrightExecutor:
             # 清理临时脚本文件
             Path(script_path).unlink(missing_ok=True)
 
-    def _generate_script(self, steps: list[dict], device: str) -> str:
+    def _generate_script(self, steps: list[dict], device: str, base_url: str | None = None) -> str:
         """从 Scenario ui_* steps 生成完整 Playwright 脚本。
 
         Args:
@@ -180,8 +186,11 @@ class PlaywrightExecutor:
 
             if action == "ui_navigate":
                 # 页面导航
-                page = config.get("page", "/").replace("'", "\\'")
-                lines.append(f"  await page.goto('{page}');")
+                path = config.get("page", "/").replace("'", "\\'")
+                if base_url:
+                    lines.append(f"  await page.goto('{base_url}{path}');")
+                else:
+                    lines.append(f"  await page.goto('{path}');")
 
             elif action == "ui_click":
                 # 点击元素

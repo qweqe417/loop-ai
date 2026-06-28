@@ -578,7 +578,16 @@ py -3 engines/cli.py init --assets-only --format json --project-root "<项目根
 
 下一步:
   1. /aicode-calibrate  确认规则（建议立即执行）
-  2. 建议安装 superpowers：/aicode-spec 必须依赖
-  3. 建议安装 CodeGraph：codegraph init -i（可选的代码索引）
-  4. /aicode-spec <需求>  开始第一个任务
+  2. 建议安装插件（复制到终端执行）:
+     - superpowers（必须，/aicode-spec 依赖）:
+       /plugin marketplace add obra/superpowers-marketplace
+       /plugin install superpowers@superpowers-marketplace
+     - ponytail（建议，避免过度工程化）:
+       /plugin marketplace add DietrichGebert/ponytail
+       /plugin install ponytail@ponytail
+     - CodeGraph（可选，代码索引）:
+       codegraph init -i
+     - Playwright（前端项目可选，QA 测试）:
+       npm init playwright@latest
+  3. /aicode-spec <需求>  开始第一个任务
 ```

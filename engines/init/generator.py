@@ -225,6 +225,10 @@ class FileGenerator:
             "auth": {
                 "token": "粘贴你的JWT token到这里",
             },
+            # 前端项目配置（Playwright 测试需要）
+            # "frontend": {
+            #     "dev_server": "http://localhost:3000"
+            # },
             "data_sources": {
                 # 示例：取消注释并修改为实际连接信息
                 # "main_db": {

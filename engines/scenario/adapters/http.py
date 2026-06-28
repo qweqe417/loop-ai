@@ -12,9 +12,12 @@ from urllib.parse import urlparse as _urlparse
 from .base import ResourceAdapter
 
 
-def _read_service_base_url() -> str | None:
-    """从当前目录的 loop-config.json 读取服务 base_url。"""
-    config_path = _Path.cwd() / ".ai" / "loop-config.json"
+def _read_service_base_url(project_root: str | None = None) -> str | None:
+    """从项目目录的 loop-config.json 读取服务 base_url。"""
+    if project_root:
+        config_path = _Path(project_root) / ".ai" / "loop-config.json"
+    else:
+        config_path = _Path.cwd() / ".ai" / "loop-config.json"
     if not config_path.exists():
         return None
     try:
@@ -35,15 +38,15 @@ class HttpAdapter(ResourceAdapter):
     adapter_label = "HTTP"
     supported_assertions = {"http_status", "http_body", "json_path", "header"}
 
-    def __init__(self, base_url: str = "", timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str = "",
+        timeout: int = 30,
+        project_root: str | None = None,
+    ) -> None:
         if not base_url:
-            base_url = _read_service_base_url()
-            if not base_url:
-                raise RuntimeError(
-                    "HttpAdapter: 未指定 base_url 且无法从 .ai/loop-config.json 读取 services[0].health，"
-                    "请先运行 aicode-init 或手动传入 base_url"
-                )
-        self.base_url = base_url.rstrip("/")
+            base_url = _read_service_base_url(project_root=project_root)
+        self.base_url = base_url.rstrip("/") if base_url else ""
         self.timeout = timeout
         self._auth_token: str | None = None
 

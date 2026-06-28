@@ -92,22 +92,34 @@ description: "Generate an Execution Plan — break requirements into tasks with 
 
 ---
 
-### 步骤 6：superpowers 做实现方案分析
+### 步骤 6：真正调用 superpowers 生成 Plan（关键！）
 
-调用 `Skill: superpowers:writing-plans`，输入：
+**必须直接调用 skill，不能只是描述性地"调用"：**
 
-| 输入 | 内容 |
-|------|------|
-| 需求 | Spec / PRD / 用户文字描述 |
-| 项目上下文 | codegraph 返回的模块结构、依赖关系 |
+```bash
+Skill: superpowers:writing-plans
+```
 
-superpowers planning 会产出：Task 拆解、文件边界、依赖顺序、可复用代码、潜在风险。
+在调用时，传递：
+- 需求：Spec 文件内容 + codegraph 返回的模块结构
+- 输出路径：告诉 superpowers 保存到 `docs/plan/<name>.md`（覆盖默认的 `docs/superpowers/plans/`）
+
+**superpowers 会产出详细格式的 Plan，包含每个 Step 的代码块和 Run 命令。**
+
+如果 skill 调用失败或输出不完整，在步骤 7 自行补充详细步骤。
 
 ---
 
-### 步骤 7：生成 Plan → Write `docs/plan/<name>.md`
+### 步骤 7：验证并补充 Plan
 
-基于 superpowers planning 的输出，生成 Plan 文件。
+如果步骤 6 superpowers 成功生成了详细 Plan：
+- 直接 Read 生成的 plan 文件
+- 补充 Spec 关联（如 `> 关联 Spec: docs/spec/xxx.md`）
+- 跳到步骤 8
+
+如果步骤 6 失败或未完成：
+- 基于步骤 5 的上下文，按照下面的模板自己生成详细 Plan
+- 每个 Step 必须有：代码块 + `Run:` 命令 + `Expected:` 预期
 
 文件内容：
 
@@ -116,33 +128,161 @@ superpowers planning 会产出：Task 拆解、文件边界、依赖顺序、可
 
 > 关联 Spec: docs/spec/<name>.md（有则写，无则标注"⚠️ 无 Spec"）
 
+**Goal**: <一句话描述这个 Plan 要实现什么>
+**Architecture**: <2-3 句话描述技术方案>
+**Tech Stack**: <关键技术栈>
+
+---
+
 ## Task 列表
 
 ### T1: <标题>
-- **Goal**: 这个 Task 达成什么
-- **Allowed Files**: file1.py, file2.py
-- **Forbidden Files**: file3.py, migrations/
-- **绑定**: AC-1, AC-2 / Scenario: xxx
-- **Style Contract**: must: 遵循现有命名 / forbidden: 引入新依赖
-- **Reuse Check**: 搜索已有: validator, base_service
-- **Implementation**: 1. xxx  2. xxx  3. xxx
-- **Verification**: lint + 测试命令 + 场景断言
-- **Done When**: curl 返回 200，响应包含分页字段
-- **Budget**: maxFiles=2, maxLines=80
 
-### T2: ...
-### T3: ...
+**Files:**
+- Create: `src/xxx.java`
+- Modify: `src/yyy.java:123-145`
+- Test: `test/zzz/Test.java`
+
+**Files Summary:**
+- 创建 `entity/XxxEntity.java`：定义租户字段 + 业务字段
+- 修改 `service/XxxService.java`：注入 EntityMapper，实现 CRUD
+- 创建 `controller/XxxController.java`：REST 端点
+
+---
+
+**Step 1: 创建 Entity**
+
+```java
+// src/entity/XxxEntity.java
+@Data
+@TableName("sys_xxx")
+public class XxxEntity {
+    private Long id;
+    private Long tenantId;    // 租户隔离字段
+    private String name;
+    private Integer status;
+    private Integer deleted;  // 逻辑删除
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+}
+```
+
+**Run**: `grep -r "tenant_id" src/entity/ | head -5` 验证租户字段模式
+**Expected**: 现有 Entity 都使用 `tenantId` 而非 `tenant_id`
+
+---
+
+**Step 2: 创建 Mapper 接口和 XML**
+
+```java
+// src/mapper/XxxMapper.java
+@Mapper
+public interface XxxMapper extends BaseMapper<XxxEntity> {
+    // 自定义查询
+    List<XxxEntity> selectByTenantId(@Param("tenantId") Long tenantId);
+}
+```
+
+```xml
+<!-- resources/mapper/XxxMapper.xml -->
+<select id="selectByTenantId" resultType="XxxEntity">
+    SELECT * FROM sys_xxx WHERE tenant_id = #{tenantId} AND deleted = 0
+</select>
+```
+
+**Run**: `mvn compile -pl data-module` 验证 Mapper 编译
+**Expected**: BUILD SUCCESS
+
+---
+
+**Step 3: 实现 Service 层**
+
+```java
+// src/service/impl/XxxServiceImpl.java
+@Service
+public class XxxServiceImpl implements XxxService {
+    @Autowired private XxxMapper mapper;
+
+    @Override
+    public XxxEntity create(XxxEntity entity) {
+        // 租户上下文由 BaseService 注入
+        entity.setTenantId(TenantContext.get());
+        mapper.insert(entity);
+        return entity;
+    }
+}
+```
+
+**Run**: `mvn compile -pl business-module` 验证 Service 编译
+**Expected**: BUILD SUCCESS
+
+---
+
+**Step 4: 实现 Controller**
+
+```java
+// src/controller/XxxController.java
+@RestController
+@RequestMapping("/api/xxx")
+public class XxxController {
+    @Autowired private XxxService service;
+
+    @PostMapping
+    public R<XxxEntity> create(@RequestBody XxxCreateRequest req) {
+        return R.ok(service.create(toEntity(req)));
+    }
+
+    @GetMapping("/{id}")
+    public R<XxxEntity> getById(@PathVariable Long id) {
+        return R.ok(service.getById(id));
+    }
+}
+```
+
+**Run**: `mvn compile -pl api-module` 验证 Controller 编译
+**Expected**: BUILD SUCCESS
+
+---
+
+**Step 5: 单元测试**
+
+```java
+@Test
+public void testCreate() {
+    // given
+    XxxEntity entity = new XxxEntity();
+    entity.setName("测试");
+    // when
+    XxxEntity result = service.create(entity);
+    // then
+    assertNotNull(result.getId());
+    assertEquals("测试", result.getName());
+}
+```
+
+**Run**: `mvn test -pl business-module -Dtest=XxxServiceTest`
+**Expected**: Tests run: 1, Failures: 0, Errors: 0
+
+---
+
+**Done When**: `mvn compile` 全模块通过，POST /api/xxx 返回 200 + 新增记录
+
+**Budget**: maxFiles=4, maxLines=200
+
+---
+
+### T2: <标题>
+...（同上格式）
 
 ## Budget 汇总
 
 | Task | 文件数 | 预计行数 |
 |------|--------|---------|
-| T1   | 2      | 80      |
+| T1   | 4      | 200     |
 | T2   | 3      | 150     |
-| T3   | 1      | 40      |
 
 ## 风险点
-- T2 涉及缓存层改造，需确认 Redis key 命名规范
+- T1 涉及多表事务，需确保 Mapper XML 的 JOIN 条件正确
 - ...
 ```
 
@@ -153,9 +293,10 @@ superpowers planning 会产出：Task 拆解、文件边界、依赖顺序、可
 自查以下项：
 
 - [ ] 如果有 Spec，每个 Acceptance Criteria 都绑定到至少一个 Task？
-- [ ] 每个 Task 都有 allowedFiles / forbiddenFiles？
-- [ ] 每个 Task 都有 doneWhen（且可验证，不是"做好了"）？
-- [ ] 每个 Task 都有 verification？
+- [ ] 每个 Task 都有 **Files 列表**（Create/Modify/Test）？
+- [ ] 每个 Task 都有 **Step 1-N**（且每个 Step 有代码块）？
+- [ ] 每个 Step 都有 `Run:` 命令 + `Expected:` 预期输出？
+- [ ] 每个 Task 都有 **Done When**（且可验证，不是"做好了"）？
 - [ ] 没有 Task 超过 5 个文件？（超过则需拆分）
 - [ ] 禁止范围膨胀：没有无关重构/格式化/新抽象？
 - [ ] 无 Spec 时 Plan 文件开头标注了风险？
@@ -188,6 +329,7 @@ T3: <标题>  (1 file, 40 lines)
 - **不写代码** — Plan 阶段只写计划文档
 - **不加载 Memory** — 方案设计不受历史经验限制
 - **codegraph 获取结构** — 不手动 grep 项目文件
-- **每个 Task 有边界** — allowedFiles / forbiddenFiles 必填
-- **每个 Task 可验证** — doneWhen 必须具体可验证，不能用模糊词
+- **superpowers 优先** — 优先调用 superpowers:writing-plans 生成详细步骤
+- **每个 Task 有边界** — Files 列表必填（Create/Modify/Test）
+- **每个 Step 有验证** — Run 命令 + Expected 输出
 - **禁止范围膨胀** — 不允许在同一个 Task 中混入无关重构、格式化或新抽象

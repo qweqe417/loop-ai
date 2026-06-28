@@ -177,6 +177,12 @@ class DomAssertion(BaseModel):
     message: str = Field(default="", description="断言描述")
 
 
+class ScenarioParams(BaseModel):
+    """单组参数化数据。"""
+    name: str = Field(description="参数组名称")
+    values: list[Any] = Field(description="参数值列表，Runner 展开后逐条执行")
+
+
 class Scenario(BaseModel):
     """验证场景 —— 完整定义，存放在 .ai/scenarios/**/*.yaml，由 ScenarioRunner 加载执行。"""
 
@@ -185,6 +191,7 @@ class Scenario(BaseModel):
     description: str = Field(default="", description="场景描述")
     requires: list[str] = Field(default_factory=list, description="所需资源: mysql / redis / mq / http_service 等")
     fixtures: list[Fixture] = Field(default_factory=list, description="前置测试数据")
+    params: list[dict[str, Any]] = Field(default_factory=list, description="参数化数据，每组展开执行一次。示例: [{sku: 'A001', qty: 1}, {sku: 'A002', qty: 5}]")
     steps: list[ScenarioStep] = Field(default_factory=list, description="执行步骤（按序）")
     assertions: list[Assertion] = Field(default_factory=list, description="断言列表")
     teardown: list[Fixture] = Field(default_factory=list, description="后置清理")

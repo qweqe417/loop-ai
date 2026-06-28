@@ -93,6 +93,89 @@ def validate_scenario_dir(dirpath: str | Path) -> list[dict]:
     return results
 
 
+def compute_coverage_matrix(scenarios_dir: str | Path, spec_file: str | Path | None = None) -> dict:
+    """计算需求覆盖矩阵。
+
+    Args:
+        scenarios_dir: .ai/scenarios/<feature>/ 目录
+        spec_file: 可选，docs/spec/<feature>.md，传入则解析需求项并匹配
+
+    Returns:
+        {
+            "total": int,
+            "covered": int,
+            "uncovered": [{"scenario_id": ..., "requirement_refs": [...]}],
+            "matrix": [{"requirement": str, "scenarios": [str], "covered": bool}],
+            "uncovered_reqs": [str],
+        }
+    """
+    d = Path(scenarios_dir)
+    if not d.is_dir():
+        return {"error": f"目录不存在: {scenarios_dir}", "total": 0, "covered": 0, "uncovered": [], "matrix": [], "uncovered_reqs": []}
+
+    # 收集所有 scenario 的 requirement_refs
+    all_requirements: dict[str, list[str]] = {}  # req_id → [scenario_id, ...]
+    all_scenarios: list[str] = []
+
+    for yf in sorted(d.rglob("*.yaml")):
+        try:
+            import yaml
+            data = yaml.safe_load(yf.read_text(encoding="utf-8")) or {}
+            sid = data.get("id", yf.stem)
+            all_scenarios.append(sid)
+            refs = data.get("metadata", {}).get("requirement_refs", []) if isinstance(data, dict) else []
+            for ref in refs:
+                all_requirements.setdefault(ref, []).append(sid)
+        except Exception:
+            pass
+
+    # 解析 spec 文件（如果有）
+    spec_requirements: list[dict] = []
+    if spec_file:
+        spec_path = Path(spec_file)
+        if spec_path.exists():
+            content = spec_path.read_text(encoding="utf-8")
+            # 简单解析 REQ-XXX 格式的需求项
+            import re
+            for line in content.splitlines():
+                m = re.match(r'(REQ-\d+)\s+(.+)', line.strip())
+                if m:
+                    spec_requirements.append({"id": m.group(1), "name": m.group(2).strip()})
+
+    # 构建矩阵
+    matrix: list[dict] = []
+    all_reqs = set(all_requirements.keys())
+    if spec_requirements:
+        for req in spec_requirements:
+            rid = req["id"]
+            scenarios = all_requirements.get(rid, [])
+            matrix.append({
+                "requirement": f"{rid} {req['name']}",
+                "scenarios": scenarios,
+                "covered": rid in all_requirements,
+            })
+            if rid not in all_requirements:
+                all_reqs.discard(rid)  # spec 有但 scenario 没覆盖
+    else:
+        # 无 spec 时，只列出 scenario 的 requirement_refs
+        for req, scens in all_requirements.items():
+            matrix.append({
+                "requirement": req,
+                "scenarios": scens,
+                "covered": True,
+            })
+
+    uncovered = [{"requirement": r, "scenarios": all_requirements.get(r, [])} for r in sorted(all_reqs) if r not in all_requirements]
+
+    return {
+        "total": len(all_reqs),
+        "covered": len(all_reqs) - len(uncovered),
+        "uncovered": uncovered,
+        "matrix": matrix,
+        "uncovered_reqs": [u["requirement"] for u in uncovered],
+    }
+
+
 # ── fixture / step 合法值 ──
 VALID_FIXTURE_TYPES = frozenset({"mysql", "redis", "http", "script", "mq"})
 

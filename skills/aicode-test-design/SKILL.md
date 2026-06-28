@@ -1,16 +1,16 @@
 ---
 name: aicode-test-design
 user-invocable: true
-description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope backend/frontend/fullstack，默认输出人读表格。"
+description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope backend/frontend/fullstack，默认输出人读 Markdown 表格。"
 ---
 
 # /aicode-test-design — 生成测试用例
 
-> **核心原则：默认只输出一份人读 Excel。自动化资产按需生成。**
+> **核心原则：用最少的测试用例覆盖最多的场景。**
 >
 > **不编造业务规则、不修改代码、不执行测试。**
 >
-> **Excel 生成统一走 CLI。不要自己写 openpyxl/xlsxwriter 代码。**
+> **统一输出 Markdown 表格，不生成 Excel。**
 
 ## engines CLI 路径解析
 
@@ -30,7 +30,7 @@ description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope b
 ## 触发方式
 
 ```bash
-# 视图A（默认人读 → 输出 .xlsx，只需需求文档）
+# 视图A（默认人读 → 输出 .md，只需需求文档）
 /aicode-test-design --from docs/spec/order.md
 /aicode-test-design --from docs/spec/order.md --scope frontend
 /aicode-test-design "用户可以创建订单，库存不足时失败"
@@ -39,6 +39,40 @@ description: "从 PRD / Spec / 需求描述生成测试用例。支持 --scope b
 /aicode-test-design --from docs/spec/order.md --plan docs/plan/order.md --mode full
 /aicode-test-design --from docs/spec/order.md --plan docs/plan/order.md --mode full --scope fullstack
 ```
+
+---
+
+## 核心原则：用最少用例覆盖最多场景
+
+### 测试设计策略（最少用例最大化覆盖）
+
+在生成测试用例之前，必须应用以下技术：
+
+#### 1. 等价类划分
+- 每个输入字段分为有效类/无效类
+- 为每个有效类设计 1 条用例
+- 无效类合并为边界用例
+
+#### 2. 边界值分析
+- 对数值范围、分页参数、字符串长度等取边界值
+- 典型边界：min, min+1, max-1, max
+
+#### 3. 状态转换图
+- 如果业务有状态机，为每条转换路径设计用例
+- 避免组合爆炸
+
+#### 4. 正交矩阵
+- 当多个条件独立时，用正交表减少组合用例
+- 例如：权限 × 操作 × 资源
+
+#### 5. 异常场景合并
+- 多个异常可合并在一条用例中
+- 用步骤或参数覆盖，不作为独立 Scenario
+
+#### 6. Happy Path + 关键异常
+- 每个 API 至少 1 条 Happy Path
+- 加上高危业务异常的用例
+- 不追求 100% 组合覆盖
 
 ---
 
@@ -134,7 +168,25 @@ PRD:  docs/prd/<feature>.md 或 .ai/prd/<feature>.md
 
 不明确的规则 → 记入"未决问题"。
 
-### ⚠️ 步骤 A2.5：HUMAN_CONFIRM（未决问题阻断）
+### 步骤 A2.5：测试设计策略（最少用例最大化覆盖）
+
+在生成用例前，先应用「核心原则」中的测试设计策略：
+
+1. **等价类划分**：列出所有输入字段的有效/无效类
+2. **边界值分析**：识别关键边界
+3. **状态转换图**：如业务有状态机
+4. **设计用例矩阵**：输出给用户确认（可选）
+
+示例输出（内部使用，可不展示）：
+```
+| 用例ID | 设计策略 | 覆盖的等价类 | 覆盖的边界值 |
+|--------|----------|--------------|--------------|
+| TC-001 | 等价类-有效类 | 用户名: 5-20字符 | - |
+| TC-002 | 边界值 | - | 用户名长度: 1, 5, 20, 50 |
+| TC-003 | 状态转换 | 订单: 新建→支付→完成 | - |
+```
+
+### ⚠️ 步骤 A2.6：HUMAN_CONFIRM（未决问题阻断）
 
 **如果分析过程中出现了未决问题（open_questions），AI 必须在此处暂停，将问题列出给用户，等待用户澄清后继续。**
 
@@ -149,6 +201,8 @@ AI: 分析过程中发现以下不确定点，请澄清：
 
 **用户未回复前，禁止进入步骤 A3。**
 
+**如果 30 分钟内无回复，AI 将使用 `inferred_source: ai` 标注继续生成，并记录待确认问题到 `.ai/test-design/<feature>/open-questions.md`，事后人工复核。**
+
 ### 步骤 A3：生成测试用例表格
 
 1. **生成 Markdown 表格** Write 到 `.ai/test-design/<feature>/测试用例.md`。
@@ -157,9 +211,7 @@ AI: 分析过程中发现以下不确定点，请澄清：
 
 **Sheet 1「测试用例」** — 主表
 
-Excel 结构：
-
-**Sheet 1「测试用例」** — 主表，列因 scope 不同：
+列因 scope 不同：
 
 | scope | 列 |
 |-------|----|
@@ -173,7 +225,7 @@ Excel 结构：
 **Sheet 3「未决问题」**（如有）：
 | 问题编号 | 问题描述 | 影响范围 | 阻塞用例 |
 
-**Excel 内容规则：**
+**内容规则：**
 - **不写具体 API 路径**（如 `GET /api/model/page?page=1&size=10`），用业务描述代替（如"打开模型列表页"）
 - 测试步骤用业务语言描述（如"填写表单并提交"），不用技术语言（如"POST /orders"）
 - 校验点描述业务含义（如"订单状态变为已创建"），不写 SQL 或 curl 命令
@@ -189,7 +241,7 @@ Excel 结构：
 
 ---
 
-## 视图B：全量模式
+## 视图B：全量模式（自动化资产）
 
 ### 步骤 B1：确认 Spec
 
@@ -203,13 +255,53 @@ Excel 结构：
    - `docs/plan/<feature>.md` 查找
    - 没有 → 接口路径 AI 推断，标注 `inferred_source: ai`
 
+### 步骤 B1.5：测试设计策略（最少用例最大化覆盖）
+
+**在生成 Scenario 之前，必须应用以下策略：**
+
+#### 1. 等价类划分
+列出所有输入字段的有效/无效类：
+- 有效类：每类 1 条用例
+- 无效类：合并为边界用例
+
+#### 2. 边界值分析
+识别关键边界：
+- 数值范围：min, min+1, max-1, max
+- 字符串长度：0, 1, 最大长度
+- 分页参数：0, 1, 最大页
+
+#### 3. 状态转换图
+如业务有状态机（如订单流程），为每条转换路径设计用例
+
+#### 4. 正交矩阵
+多个独立条件时，使用正交表减少组合：
+- 示例：权限(3) × 操作(4) × 资源(5) = 60 → 正交后 12 条
+
+#### 5. 异常场景合并
+多个异常合并在一条 Scenario 中：
+- 用 params 字段参数化
+- 或用循环步骤
+
+#### 6. Happy Path + 关键异常
+- 每个 API 至少 1 条 Happy Path
+- 高危业务异常单独用例
+- 不追求 100% 组合覆盖
+
+**输出用例设计表（给用户确认，可选）：**
+```
+| Scenario ID | 设计策略 | 覆盖需求 | 参数化 |
+|-------------|----------|----------|--------|
+| order-create-success | Happy Path | REQ-001 | - |
+| order-create-boundary | 边界值 | REQ-001 | quantity: [0, 1, 999999] |
+```
+
 ### 步骤 B2：生成 Scenario YAML
 
 **每个 Scenario 一个独立文件。文件必须放在 feature 子目录下，不能直接放 `.ai/scenarios/` 根目录。**
 
 #### ① 先建目录（用 Bash，不要跳过）
 
-Feature 名 = Spec 文件名去掉 `.md`。比如 `docs/spec/order-management.md` → `order-management`。
+Feature 名 = Spec 文件名去掉 `.md`，必须是 kebab-case。
 
 ```bash
 mkdir -p .ai/scenarios/<feature>
@@ -238,28 +330,11 @@ mkdir -p .ai/scenarios/<feature>
 {engines_cmd} data query --source main_db --target "SHOW COLUMNS FROM sys_tenant"
 ```
 
-```json
-// 返回结果中逐列检查：
-// Field: password_hash, Null: NO, Default: null  → 必须写
-// Field: created_at,    Null: NO, Default: CURRENT_TIMESTAMP → 有默认，可选
-```
-
-**如果项目多数据库源：** 优先用 `main_db`，如 fixture 涉及其他库则查对应 source。
-
 #### ② 再写文件
 
 每个 Scenario Write 到 `.ai/scenarios/<feature>/<scenario-id>.yaml`。路径必须包含 `<feature>/` 子目录。
 
-```
-.ai/scenarios/
-  order-management/           ← 一个 Spec 一个子目录
-    order-create-success.yaml
-    order-create-stock-insufficient.yaml
-  user-auth/                  ← 另一个 Spec 的子目录
-    login-success.yaml
-```
-
-#### ③ 文件格式（单 Scenario，非数组）
+#### ③ 文件格式（支持参数化）
 
 ```yaml
 # .ai/scenarios/order-management/order-create-success.yaml
@@ -318,6 +393,109 @@ metadata:
   requirement_refs: [REQ-001]
   priority: P0
   risk_level: high
+  design_strategy: happy_path
+```
+
+#### ③.5 参数化 Scenario（减少冗余）
+
+**同类用例使用 params 字段参数化，减少文件数量：**
+
+```yaml
+# 参数化示例：用一条 Scenario 覆盖多个等价类
+id: order-create-boundary-quantity
+name: 创建订单边界数量测试
+params:
+  - {quantity: 1, expected_status: 200, expected_stock: 9}
+  - {quantity: 0, expected_status: 400, expected_stock: 10}
+  - {quantity: 999999, expected_status: 400, expected_stock: 10}
+
+steps:
+  - name: 调用创建订单接口
+    type: http_call
+    config:
+      method: POST
+      url: /api/orders
+      body: {sku: SKU-A001, quantity: "{{quantity}}"}
+      headers:
+        Authorization: "Bearer ${auth_token}"
+
+assertions:
+  - type: http_status
+    target: status
+    operator: eq
+    expected: "{{expected_status}}"
+
+metadata:
+  requirement_refs: [REQ-001, REQ-002]
+  priority: P1
+  design_strategy: boundary_value
+```
+
+**Runner 执行参数化 Scenario 时，会对每组 params 执行一次断言。**
+
+#### ④ 复杂场景示例
+
+**多步骤依赖：**
+```yaml
+steps:
+  - name: 创建用户
+    type: http_call
+    config:
+      method: POST
+      url: /api/users
+      body: {username: "test"}
+  - name: 使用上一步响应
+    type: http_call
+    config:
+      method: GET
+      url: "/api/users/${STEP_1.response.data.id}"
+```
+
+**异步回调验证：**
+```yaml
+steps:
+  - name: 触发异步任务
+    type: http_call
+    config:
+      method: POST
+      url: /api/tasks
+  - name: 等待消息队列回调
+    type: mq_consume
+    config:
+      queue: task_completed
+      timeout: 30
+  - name: 验证结果
+    type: http_call
+    config:
+      method: GET
+      url: "/api/tasks/${STEP_1.response.data.taskId}/status"
+```
+
+**并发冲突模拟：**
+```yaml
+steps:
+  - name: 并发请求A
+    type: http_call
+    config:
+      method: POST
+      url: /api/inventory/lock
+      body: {sku: SKU-A001}
+  - name: 并发请求B（同一SKU）
+    type: http_call
+    config:
+      method: POST
+      url: /api/inventory/lock
+      body: {sku: SKU-A001}
+
+assertions:
+  - type: http_status
+    target: "[0].status"
+    operator: eq
+    expected: 200
+  - type: http_status
+    target: "[1].status"
+    operator: eq
+    expected: 409
 ```
 
 **Scenario 字段说明：**
@@ -327,14 +505,15 @@ metadata:
 | id | str | ✅ | 唯一标识，kebab-case |
 | name | str | ✅ | 场景名称 |
 | description | str | | 描述 |
+| params | list[dict] | | 参数化数据，每组执行一次 |
 | scope | backend/frontend/fullstack | | 默认 backend |
 | requires | list[str] | | http_service, mysql, redis, mq, browser 等 |
 | fixtures | list[Fixture] | | 前置数据，type=mysql/redis/http/script |
 | steps | list[ScenarioStep] | ✅ | 执行步骤，type=http_call/wait/setup/script/ui_* |
-| assertions | list[Assertion] | ✅ | 断言，type=http_status/json_path/db_query/db_count/redis_key/redis_value 等 |
+| assertions | list[Assertion] | ✅ | 断言，type=http_status/json_path/db_query 等 |
 | dom_assertions | list[DomAssertion] | | 前端 DOM 断言 |
 | teardown | list[Fixture] | | 后置清理 |
-| metadata | dict | | 优先级/风险/关联需求等 |
+| metadata | dict | | 优先级/风险/关联需求/设计策略 |
 
 **交叉校验规则（生成时执行）：**
 - steps[].config 中的接口路径/参数 → 来自 Plan
@@ -356,16 +535,18 @@ AI: 以下需求点不确定，请先澄清再生成 Scenario：
 
 **用户未回复前，禁止进入步骤 B3。**
 
+**如果 30 分钟内无回复，AI 将使用 `inferred_source: ai` 标注继续生成，并记录待确认问题到 `.ai/test-design/<feature>/open-questions.md`，事后人工复核。**
+
 ### 步骤 B2.3：增量生成（首次可跳过）
 
 如果 `.ai/scenarios/<feature>/` 下已有文件，先 Read 已有 yaml，列出已覆盖的 requirement_refs，只生成新增/变更的。首次生成跳过此步。
 
-### 步骤 B3：调 Python 校验
+### 步骤 B3：调 Python 校验 + 覆盖校验
 
 每个生成的 Scenario 文件必须通过校验：
 
 ```bash
-{engines_cmd} scenario validate --dir .ai/scenarios/
+{engines_cmd} scenario validate --dir .ai/scenarios/<feature>/
 ```
 
 返回 JSON：
@@ -391,8 +572,13 @@ AI: 以下需求点不确定，请先澄清再生成 Scenario：
 
 ### 步骤 B4：覆盖校验
 
-逐条对比 Spec 的 requirements vs 已生成 Scenario 的 `metadata.requirement_refs`：
+**使用 CLI 自动输出覆盖矩阵：**
 
+```bash
+{engines_cmd} scenario validate --dir .ai/scenarios/<feature>/ --coverage docs/spec/<feature>.md
+```
+
+自动输出：
 ```
 | Spec 需求 | 覆盖的 Scenario | 状态 |
 |-----------|----------------|------|
@@ -421,11 +607,12 @@ AI: 测试设计完成。
 | P0/P1 | 3 |
 | 断言总数 | 18 |
 | 校验 | 通过 (0 errors, 1 warning) |
+| 设计策略 | 等价类(3) + 边界值(2) + Happy Path(1) |
 
 文件:
   .ai/scenarios/<feature>/
     ├── order-create-success.yaml
-    ├── order-create-stock-insufficient.yaml
+    ├── order-create-boundary-quantity.yaml  # 参数化
     └── ...
 ```
 
@@ -441,13 +628,13 @@ AI: 测试设计完成。
 - **视图B 需要需求文档 + Plan** — 无 Plan 触发降级（标记 `inferred_source: ai`）
 - **视图B 直接生成 Scenario YAML** — 不再走 TestCase 中间格式
 - **视图B 交叉校验** — 接口路径/参数对 Plan，业务断言对 Spec，不一致写 open_questions
-- **HUMAN_CONFIRM** — 有 open_questions 时先澄清再继续
+- **HUMAN_CONFIRM** — 有 open_questions 时先澄清再继续，超时 30 分钟自动继续并记录
 - **视图B 调 `engines scenario validate`** — Pydantic 格式校验 + 基本健全性
-- **视图A 只输出 .xlsx 文件**（Excel 由 skill 自行生成，走 Markdown 表格降级）
-- **不手动写 openpyxl/xlsxwriter** — Excel/Markdown 由 skill 处理
+- **视图A 只输出 .md 文件** — 不生成 Excel
 
 ### 内容规则
 - **文件路径: `.ai/scenarios/<feature>/<id>.yaml`** — 不直接放根目录
+- **Spec 文件名必须是 kebab-case** — 直接作为 feature 目录名
 - **写 mysql fixture 前必须先查表结构** — `{engines_cmd} data query --source main_db --target "SHOW COLUMNS FROM <table>"`，禁止猜列名、禁止遗漏 NOT NULL 无默认值列
 - **不编造业务规则** — 不确定的写入 open_questions
 - **接口路径来自 Plan** — 无 Plan 时标注 `inferred_source: ai`
@@ -455,4 +642,13 @@ AI: 测试设计完成。
 - **涉及 UI 必须有 dom_assertions**（frontend/fullstack）
 - **P0/P1 必须有覆盖**
 - **每个 backend/fullstack 场景必须有 teardown 清理步骤**
+- **同类用例使用 params 参数化** — 减少冗余文件
 - **不修改代码**
+
+### 测试设计规则
+- **等价类划分** — 每类 1 条用例
+- **边界值分析** — min, min+1, max-1, max
+- **状态转换图** — 每条路径 1 条用例
+- **异常合并** — 多异常合并，不独立 Scenario
+- **Happy Path + 关键异常** — 不追求 100% 组合
+- **参数化** — 同类用例用 params 合并
