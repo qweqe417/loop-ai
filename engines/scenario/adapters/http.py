@@ -99,7 +99,10 @@ class HttpAdapter(ResourceAdapter):
         method = action.upper()
         req = _request.Request(url, data=data_bytes, method=method)
         for k, v in headers.items():
-            req.add_header(k, v)
+            # HTTP header 必须为 ASCII。用 Latin-1 保留原始字节（0-255 范围），
+            # 而非静默丢弃非 ASCII 字符（如 encode('ascii','ignore') 会做的）
+            safe_v = str(v).encode('latin-1', errors='replace').decode('latin-1')
+            req.add_header(k, safe_v)
 
         try:
             with _request.urlopen(req, timeout=self.timeout) as resp:

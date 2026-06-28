@@ -222,6 +222,7 @@ class ClaudeCodeAdapter(ToolAdapter):
         project_root: Path,
         plugin_root: Path,
         providers: list[Any] | None = None,
+        profile: ProjectProfile | None = None,
     ) -> dict[str, Any]:
         """Claude Code 安装：MCP 配置 / loop-config.json / karpathy.md 规则。"""
         created: list[str] = []
@@ -265,6 +266,11 @@ class ClaudeCodeAdapter(ToolAdapter):
         for key in defaults:
             if key not in loop_config:
                 loop_config[key] = defaults[key]
+
+        # ── 自动检测前端项目，填充 test 配置 ─────────────────────
+        from engines.adapters.base import _auto_fill_test_config
+        _auto_fill_test_config(root, defaults, loop_config)
+
         loop_config_dst.write_text(
             json.dumps(loop_config, ensure_ascii=False, indent=2), encoding="utf-8"
         )

@@ -15,6 +15,7 @@ from .models import (
     DomAssertion,
     Fixture,
     FixtureEntry,
+    FrontendTestCase,
     GivenConfig,
     SanityCheckItem,
     Scenario,
@@ -64,6 +65,7 @@ __all__ = [
     "GivenConfig",
     "CleanupConfig",
     "DomAssertion",
+    "FrontendTestCase",
     # 引擎
     "ScenarioRunner",
     "ScenarioResult",

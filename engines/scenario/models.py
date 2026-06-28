@@ -168,6 +168,61 @@ class CleanupConfig(BaseModel):
     description: str = Field(default="", description="清理说明")
 
 
+# ── 前端 E2E 测试用例模型 ──────────────────────────────────────────────
+
+class FrontendStepType(str, Enum):
+    """前端步骤类型。"""
+    UI_NAVIGATE = "ui_navigate"
+    UI_CLICK = "ui_click"
+    UI_FILL = "ui_fill"
+    UI_SELECT = "ui_select"
+    UI_WAIT = "ui_wait"
+    UI_SCREENSHOT = "ui_screenshot"
+    UI_PRESS = "ui_press"
+
+
+class FrontendStep(BaseModel):
+    """前端 E2E 单个步骤。"""
+    name: str = Field(description="步骤名称")
+    type: FrontendStepType = Field(description="步骤类型")
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="步骤配置，类型不同字段不同",
+    )
+
+
+class FrontendAssertionType(str, Enum):
+    """前端断言类型。"""
+    URL_CONTAIN = "url_contain"
+    URL_MATCH = "url_match"
+    DOM_VISIBLE = "dom_visible"
+    DOM_HIDDEN = "dom_hidden"
+    DOM_TEXT = "dom_text"
+    DOM_COUNT = "dom_count"
+    DOM_VALUE = "dom_value"
+    TITLE = "title"
+
+
+class FrontendAssertion(BaseModel):
+    """前端 E2E 单条断言。"""
+    type: FrontendAssertionType = Field(description="断言类型")
+    target: str = Field(default="", description="CSS selector 或 URL 模式")
+    operator: str = Field(default="eq", description="比较运算符")
+    expected: Any = Field(default=None, description="期望值")
+    message: str = Field(default="", description="断言失败时的说明")
+
+
+class FrontendTestCase(BaseModel):
+    """前端 E2E 测试用例 — 对应 .ai/test-design/<feature>/frontend-cases.yaml。"""
+    name: str = Field(description="用例名称")
+    folder: str = Field(description="测试文件输出目录名（tests/&lt;folder&gt;/）")
+    description: str = Field(default="", description="用例描述")
+    steps: list[FrontendStep] = Field(default_factory=list, description="执行步骤")
+    assertions: list[FrontendAssertion] = Field(default_factory=list, description="断言列表")
+    viewport: str | None = Field(default=None, description="视口，如 'iPhone 14'")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="额外元数据")
+
+
 class DomAssertion(BaseModel):
     """前端 DOM 断言。"""
     type: str = Field(description="dom_visible | dom_text | dom_count | dom_value | dom_hidden")

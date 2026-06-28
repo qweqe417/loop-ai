@@ -1798,7 +1798,23 @@ class VerifyHandler(StageHandler):
                 for s in scenarios
             ) if scenarios else True  # 无场景时默认需要后端检查
 
-            if needs_backend:
+            # 从 loop-config.json 读取配置
+            from pathlib import Path as _Path
+            import json as _json
+            config_path = _Path(state.project_root) / ".ai" / "loop-config.json"
+            config = {}
+            if config_path.exists():
+                try:
+                    config = _json.loads(config_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            # 判断是否需要后端：auto_start_backend=false 时跳过
+            auto_start_backend = config.get("auto_start_backend", True)
+            if not auto_start_backend:
+                state.task_state.notes.append("[VERIFY] auto_start_backend=false，跳过后端服务检查")
+                base_url = None
+            elif needs_backend:
                 # 从 loop-config.json 读取服务地址（未配置时返回 None）
                 base_url = _get_service_base_url(state.project_root)
                 if base_url:
@@ -1812,7 +1828,263 @@ class VerifyHandler(StageHandler):
             # 读取前端开发服务器地址（供 Playwright 使用）
             frontend_base_url = _get_frontend_dev_server(state.project_root)
 
-            # 加载 DataSourceRegistry（DB/Redis/MQ 适配器）
+            # ── 前端 E2E 模式 ─────────────────────────────────────────────
+            # 从 loop-config.json 读取 test.target，决定走前端还是后端
+            test_config = config.get("test", {})
+            test_target = test_config.get("target", "backend")
+
+            if test_target == "frontend":
+                # 前端模式：跳过 backend ScenarioRunner，走 Playwright E2E
+                state.task_state.notes.append(
+                    f"[VERIFY] 前端 E2E 模式 (target=frontend)"
+                )
+
+                # 1. 查找所有 frontend-cases.yaml
+                from pathlib import Path as _Path
+
+                frontend_cases = self._load_frontend_cases(state.project_root)
+                if not frontend_cases:
+                    state.task_state.notes.append(
+                        "[VERIFY] 未找到 frontend-cases.yaml，跳过 E2E"
+                    )
+                    state.verification.status = VerificationStatus.SKIPPED
+                    state.verification.summary = "无前端测试用例"
+                    self._cleanup(state, service_manager)
+                    return self._complete(state, "frontend: 无用例跳过")
+
+                # 2. 启动前端开发服务器
+                dev_command = test_config.get("dev_command", "")
+                dev_server_url = test_config.get("dev_server", frontend_base_url or "http://localhost:3000")
+                dev_server_process = None
+
+                if dev_command:
+                    try:
+                        import subprocess
+                        import sys
+                        state.task_state.notes.append(
+                            f"[VERIFY] 启动前端: {dev_command}"
+                        )
+                        # 后台启动，不等待。Windows 上静默启动（无控制台窗口）
+                        popen_kwargs = {
+                            "shell": True,
+                            "stdout": subprocess.DEVNULL,
+                            "stderr": subprocess.DEVNULL,
+                            "cwd": str(_Path(state.project_root)),
+                        }
+                        if sys.platform == "win32":
+                            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                        dev_server_process = subprocess.Popen(**popen_kwargs)
+                        # 等待服务就绪（HTTP 健康检查）
+                        import time as _time
+                        import urllib.request as _urllib
+                        ready = False
+                        for _attempt in range(20):
+                            try:
+                                _urllib.urlopen(dev_server_url, timeout=2)
+                                ready = True
+                                break
+                            except Exception:
+                                _time.sleep(0.5)
+                        if ready:
+                            state.task_state.notes.append(
+                                f"[VERIFY] 前端服务已就绪: {dev_server_url}"
+                            )
+                        else:
+                            state.task_state.notes.append(
+                                f"[VERIFY] 前端服务等待超时，继续执行"
+                            )
+                    except Exception as exc:
+                        state.task_state.notes.append(
+                            f"[VERIFY] 前端启动失败: {exc}"
+                        )
+
+                # 3. 生成 .spec.ts 并运行 Playwright
+                try:
+                    from engines.scenario.spec_file_generator import SpecFileGenerator
+
+                    generator = SpecFileGenerator(_Path(state.project_root))
+                    browsers = test_config.get("browsers", ["chromium"])
+                    playwright_timeout = test_config.get("timeout", 60)
+                    test_dir = test_config.get("test_dir", "tests")
+                    playwright_results: list = []
+
+                    for feature_name, test_cases in frontend_cases.items():
+                        for tc in test_cases:
+                            spec_path = generator.generate(tc)
+                            state.task_state.notes.append(
+                                f"[VERIFY] 生成测试: {spec_path}"
+                            )
+
+                            # 运行 Playwright（指定 testDir + 文件过滤）
+                            try:
+                                import subprocess as _subprocess
+
+                                browser = browsers[0] if browsers else "chromium"
+                                # 从 config 读取包管理器命令，默认 npx；支持 pnpm/yarn/bun
+                                pm = test_config.get("package_manager", "npx")
+                                cmd = [
+                                    pm, "playwright", "test",
+                                    str(spec_path),
+                                    "--config", "playwright.config.ts",
+                                    "--project", browser,
+                                    "--reporter", "list",
+                                ]
+                                state.task_state.notes.append(
+                                    f"[VERIFY] 运行: {' '.join(cmd)}"
+                                )
+
+                                result = _subprocess.run(
+                                    cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=playwright_timeout + 30,
+                                    cwd=str(_Path(state.project_root)),
+                                )
+
+                                # 解析结果
+                                from engines.scenario.models import ScenarioResult
+
+                                passed = result.returncode == 0
+                                stdout = result.stdout
+                                stderr = result.stderr
+
+                                # 从 stdout 提取通过/失败数
+                                import re
+                                passed_match = re.findall(r"^\s*(\d+) passed", stdout, re.MULTILINE)
+                                failed_match = re.findall(r"^\s*(\d+) failed", stdout, re.MULTILINE)
+                                p_count = sum(int(x) for x in passed_match)
+                                f_count = sum(int(x) for x in failed_match)
+
+                                pr = ScenarioResult(
+                                    scenario_id=f"frontend-{tc.folder}-{tc.name}",
+                                    name=f"[Frontend] {tc.name}",
+                                    passed=passed,
+                                    assertions_total=p_count + f_count,
+                                    assertions_passed=p_count,
+                                    errors=[stderr] if not passed else [],
+                                    duration_ms=0.0,
+                                    step_results=[],
+                                    failure_category=None if passed else "REAL_BUG",
+                                    failed_assertions=[],
+                                )
+                                playwright_results.append(pr)
+
+                                state.task_state.notes.append(
+                                    f"[VERIFY] Playwright: {p_count} passed, {f_count} failed"
+                                )
+
+                            except _subprocess.TimeoutExpired:
+                                playwright_results.append(
+                                    ScenarioResult(
+                                        scenario_id=f"frontend-{tc.folder}",
+                                        name=f"[Frontend] {tc.name}",
+                                        passed=False,
+                                        assertions_total=0,
+                                        assertions_passed=0,
+                                        errors=["Playwright 执行超时"],
+                                        duration_ms=0.0,
+                                        failure_category="TIMING",
+                                    )
+                                )
+                            except FileNotFoundError:
+                                playwright_results.append(
+                                    ScenarioResult(
+                                        scenario_id=f"frontend-{tc.folder}",
+                                        name=f"[Frontend] {tc.name}",
+                                        passed=False,
+                                        assertions_total=0,
+                                        assertions_passed=0,
+                                        errors=["Playwright 未安装，请运行: npx playwright install"],
+                                        duration_ms=0.0,
+                                        failure_category="ENVIRONMENT",
+                                    )
+                                )
+                            except Exception as exc:
+                                playwright_results.append(
+                                    ScenarioResult(
+                                        scenario_id=f"frontend-{tc.folder}",
+                                        name=f"[Frontend] {tc.name}",
+                                        passed=False,
+                                        assertions_total=0,
+                                        assertions_passed=0,
+                                        errors=[str(exc)],
+                                        duration_ms=0.0,
+                                        failure_category="ENVIRONMENT",
+                                    )
+                                )
+
+                    # 汇总结果（前端 E2E 结果不影响后端 scenario_results）
+                    frontend_results = playwright_results
+                    if playwright_results:
+                        p_total = sum(r.assertions_passed for r in playwright_results)
+                        f_total = sum(r.assertions_total - r.assertions_passed for r in playwright_results)
+                        all_passed = all(r.passed for r in playwright_results)
+                        state.task_state.notes.append(
+                            f"[VERIFY] Frontend E2E: {p_total} passed, {f_total} failed"
+                        )
+                        state.task_state.notes.append(
+                            f"[VERIFY] All passed: {all_passed}"
+                        )
+                    else:
+                        state.task_state.notes.append("[VERIFY] 无前端测试结果")
+
+                except Exception as exc:
+                    logger.warning("Frontend E2E failed: %s", exc)
+                    state.task_state.notes.append(f"[VERIFY] Frontend E2E error: {exc}")
+
+                # 4. 停止前端服务
+                if dev_server_process:
+                    try:
+                        dev_server_process.terminate()
+                        dev_server_process.wait(timeout=5)
+                        state.task_state.notes.append("[VERIFY] 前端服务已停止")
+                    except Exception:
+                        try:
+                            dev_server_process.kill()
+                        except Exception:
+                            pass
+
+                # 清理并跳转失败处理（复用已有逻辑）
+                self._cleanup(state, service_manager)
+                state.scenario_results = [
+                    r.to_state() if hasattr(r, 'to_state') else r
+                    for r in frontend_results
+                ]
+
+                # 失败处理复用已有逻辑
+                failed_results = [r for r in frontend_results if not getattr(r, 'passed', True)]
+                if failed_results:
+                    from engines.state.enums import FailureCategory
+                    from engines.state.models import FailureRecord
+
+                    for fr in failed_results:
+                        state.failures.append(FailureRecord(
+                            category=FailureCategory.REAL_BUG,
+                            message=f"[Frontend] {getattr(fr, 'name', '')}: {'; '.join(getattr(fr, 'errors', []))}",
+                            stage=StageType.VERIFY,
+                            attempt_count=state.task_state.retry_count + 1,
+                        ))
+                    state.verification.status = VerificationStatus.FAILED
+                    state.verification.summary = f"Frontend E2E: {len(failed_results)} failed"
+                    state.task_state.status = state.task_state.status.__class__.FAILED
+                    state.needs_ai_input = True
+                    state.pending_action = "repair"
+                    state.pending_prompt = {
+                        "instruction": (
+                            f"Frontend E2E 测试失败 ({len(failed_results)} 条)，"
+                            f"请分析测试报告，修正 frontend-cases.yaml 中的步骤或断言，"
+                            f"然后 loop continue。"
+                        ),
+                    }
+                    return state
+
+                # 全部通过
+                state.verification.status = VerificationStatus.PASSED
+                state.verification.summary = f"Frontend E2E: {len(scenario_results)} all passed"
+                state.task_state.status = state.task_state.status.__class__.VERIFIED
+                return self._complete(state, "frontend: 全部通过")
+
+            # ── 后端模式（原有逻辑不变）───────────────────────────────
             from engines.scenario.adapters import DataSourceRegistry
             ds_registry = DataSourceRegistry.load(state.project_root)
             if ds_registry._adapters:
@@ -2345,6 +2617,52 @@ class VerifyHandler(StageHandler):
                     pass
 
         return loaded
+
+    @staticmethod
+    def _load_frontend_cases(project_root) -> dict[str, list]:
+        """从 .ai/test-design/<feature>/frontend-cases.yaml 加载前端测试用例。
+
+        Returns:
+            dict[feature_name, list[FrontendTestCase]]: 按 feature 分组的用例
+        """
+        from pathlib import Path
+
+        test_design_dir = Path(project_root) / ".ai" / "test-design"
+        if not test_design_dir.is_dir():
+            return {}
+
+        result: dict[str, list] = {}
+        for feature_dir in test_design_dir.iterdir():
+            if not feature_dir.is_dir():
+                continue
+            yaml_path = feature_dir / "frontend-cases.yaml"
+            if not yaml_path.exists():
+                continue
+            try:
+                import yaml
+                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            if not data:
+                continue
+
+            # 支持 dict（单个用例）或 list（用例列表）
+            items = data if isinstance(data, list) else [data]
+            cases: list = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    from engines.scenario.models import FrontendTestCase
+                    cases.append(FrontendTestCase.model_validate(item))
+                except Exception:
+                    pass
+
+            if cases:
+                result[feature_dir.name] = cases
+
+        return result
 
 
 class RepairHandler(StageHandler):

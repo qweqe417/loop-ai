@@ -89,13 +89,11 @@ class ScenarioResult:
             assertions_total=self.assertions_total,
             assertions_passed=self.assertions_passed,
             errors=self.errors,
-            metadata={
-                "duration_ms": self.duration_ms,
-                "step_count": len(self.step_results),
-                "failure_category": self.failure_category,
-                "failed_assertions": self.failed_assertions,
-                **self.metadata,
-            },
+            duration_ms=self.duration_ms,
+            step_results=self.step_results,
+            failure_category=self.failure_category,
+            failed_assertions=self.failed_assertions,
+            metadata=self.metadata,
         )
 
     def repair_context(self) -> dict[str, Any]:

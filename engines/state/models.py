@@ -127,6 +127,14 @@ class ScenarioResult(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict, description="额外数据（HTTP 状态码 / 响应时间等）"
     )
+    # 耗时（毫秒），供前端 E2E 使用
+    duration_ms: float = Field(default=0.0, description="耗时毫秒")
+    # 步骤结果列表，供前端 E2E 使用
+    step_results: list[dict[str, Any]] = Field(default_factory=list)
+    # 失败分类，供前端 E2E 使用
+    failure_category: str | None = Field(default=None)
+    # 失败断言详情，供前端 E2E 使用
+    failed_assertions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # 失败记录模型：REPAIR 阶段的输入，MEMORY 阶段的素材

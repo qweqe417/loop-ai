@@ -435,6 +435,7 @@ class InitRunner:
                 project_root=self._root,
                 plugin_root=plugin_root,
                 providers=self._providers,
+                profile=profile,
             )
             if result.get("success"):
                 created = result.get("files_created", [])

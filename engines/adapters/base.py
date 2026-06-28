@@ -224,6 +224,16 @@ class ToolAdapter(ABC):
             "auth": {
                 "token": "粘贴你的JWT token到这里",
             },
+            # ── 测试目标（决定 verify 阶段走前端 E2E 还是后端场景）──
+            # target: "backend"（默认）或 "frontend"
+            "test": {
+                "target": "backend",
+                "test_dir": "tests",
+                "dev_server": "http://localhost:3000",
+                "dev_command": "npm run dev",
+                "browsers": ["chromium"],
+                "timeout": 60,
+            },
             # ── 服务启停（可选，不配则 ServiceManager 自动检测）──
             # "services": [
             #     {
@@ -241,12 +251,57 @@ class ToolAdapter(ABC):
         project_root: Path,
         plugin_root: Path,
         providers: list[Any] | None = None,
+        profile: "ProjectProfile | None" = None,
     ) -> dict[str, Any]:
         """执行工具特定的安装步骤。
 
-        返回 {"created": [...], "skipped": [...], "errors": [...]}
+        Args:
+            project_root: 项目根目录
+            plugin_root: 插件根目录
+            providers: Provider 列表
+            profile: 项目画像（可选，用于生成 test 配置等）
+
+        Returns:
+            {"created": [...], "skipped": [...], "errors": [...]}
         """
         ...
+
+
+def _auto_fill_test_config(root: Path, defaults: dict, loop_config: dict) -> None:
+    """自动检测前端项目并填充 test 配置。三个 adapter 共用此逻辑。"""
+    has_playwright = (root / "playwright.config.ts").exists()
+    has_vite_config = (root / "vite.config.ts").exists()
+    has_package_json = (root / "package.json").exists()
+    is_frontend = has_playwright and has_vite_config and has_package_json
+
+    if is_frontend and "test" in defaults:
+        import json as _json
+        test_defaults = defaults["test"].copy()
+        # 尝试从 package.json 读取 dev 命令和包管理器
+        try:
+            pkg = _json.loads((root / "package.json").read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts", {})
+            dev_cmd = scripts.get("dev", "")
+            if dev_cmd:
+                test_defaults["dev_command"] = dev_cmd
+            # 从 packageManager 字段读取（pnpm/yarn/bun）
+            pkg_manager = pkg.get("packageManager", "")
+            if pkg_manager:
+                # "pnpm@9" -> "pnpm"
+                pm = pkg_manager.split("@")[0]
+                test_defaults["package_manager"] = pm
+        except Exception:
+            pass
+        # 合并到 loop_config（已有值优先）
+        if "test" not in loop_config:
+            loop_config["test"] = test_defaults
+        else:
+            for k, v in test_defaults.items():
+                if k not in loop_config["test"]:
+                    loop_config["test"][k] = v
+        import logging
+        logging.getLogger(__name__).info("Frontend project detected, test config auto-filled")
+
 
     # ── 已有文件检测 ──
 
